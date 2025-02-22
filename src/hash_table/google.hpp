@@ -33,7 +33,7 @@ namespace duckdb {
         MemoryManager &memory_manager;
 
         GoogleHashTable(uint64_t number_of_records, MemoryManager &memory_manager) : memory_manager(memory_manager) {
-            capacity = next_power_of_two(2 * number_of_records);
+            capacity = NextPowerOfTwo(2 * number_of_records);
 
             uint64_t ht1_size = capacity * sizeof(uint8_t);
             uint64_t ht2_size = capacity * sizeof(uint64_t);

@@ -14,8 +14,8 @@ namespace duckdb {
     typedef void (*scatter_function_t)(const Vector &source, const SelectionVector &sel, const idx_t count,
                                        const idx_t jump_offset, data_ptr_t target);
 
-    typedef void (*gather_function_t)(Vector &target, const SelectionVector &sel, const idx_t count,
-                                      const idx_t jump_offset, data_ptr_t source);
+    typedef void (*gather_function_t)(const Vector &row_pointers, const SelectionVector &sel, const idx_t count,
+                                      const idx_t column_offset, Vector &target);
 
     template<typename DATA_TYPE>
     void Scatter(const Vector &source, const SelectionVector &sel, const idx_t count,
@@ -29,13 +29,18 @@ namespace duckdb {
     }
 
     template<typename DATA_TYPE>
-    void Gather(Vector &target, const SelectionVector &sel, const idx_t count,
-                const idx_t jump_offset, data_ptr_t source) {
+    void Gather(const Vector &row_pointers_v, const SelectionVector &sel, const idx_t count,
+                const idx_t column_offset, Vector &target) {
+
+        auto row_pointers = FlatVector::GetData<data_ptr_t>(row_pointers_v);
         auto target_data = FlatVector::GetData<DATA_TYPE>(target);
+
         for (idx_t i = 0; i < count; i++) {
-            auto source_idx = sel.get_index(i);
-            auto source_value = Load<DATA_TYPE>(source + jump_offset * i);
-            target_data[source_idx] = source_value;
+            idx_t sel_idx = sel.get_index(i);
+            auto row_ptr = row_pointers[sel_idx];
+            auto value_ptr = row_ptr + column_offset;
+            auto value = Load<DATA_TYPE>(value_ptr);
+            target_data[i] = value;
         }
     }
 

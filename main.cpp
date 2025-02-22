@@ -23,8 +23,11 @@ void test_materialization(uint8_t partition_bits, HashTableType ht_type) {
     Connection con(db);
 
     const vector<column_t> keys = {0};
-    const auto result = con.Query("SELECT key, key, key FROM build;");
+    const auto result = con.Query("SELECT key, key, key FROM build_10_percent;");
 
+    if (result->HasError()) {
+        throw std::runtime_error(result->GetError());
+    }
     auto next_chunk = result->Fetch();
     if (!next_chunk) {
         throw std::runtime_error("No data");
@@ -58,7 +61,7 @@ void test_materialization(uint8_t partition_bits, HashTableType ht_type) {
     const auto total_duration = time(start);
     std::cout << "Total=" << total_duration << "ms ";
 
-    std::cout << "Collisions=" << hash_table->GetCollisionRate() << " HTSize=" << BytesToString(hash_table->GetCapacity()) << " HTPartitionSize=" << BytesToString(hash_table->GetCapacity() >> partition_bits) << '\n';
+    std::cout << "Collisions=" << hash_table->GetCollisionRate() << " HTSize=" << BytesToString(hash_table->GetCapacity() * sizeof(ht_slot_t)) << " HTPartitionSize=" << BytesToString((hash_table->GetCapacity() >> partition_bits) * sizeof(ht_slot_t)) << '\n';
 
     // layout.Print();
     layout.Free();
@@ -75,7 +78,5 @@ int main() {
         for (uint8_t i = 0; i < 9; i += 2) {
             test_materialization(i, LINEAR_PROBING_PARTITIONED);
         }
-        std::cout << "LINEAR_PROBING_ATOMIC" << '\n';
-        test_materialization(0, LINEAR_PROBING_ATOMIC);
     }
 }

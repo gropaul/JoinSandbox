@@ -9,13 +9,18 @@
 #include <iostream>
 
 #include "base.hpp"
+#include "materialization/row_layout.hpp"
 
+
+// typedef uint32_t key_t;
+typedef uint64_t ht_slot_t;
 
 namespace duckdb {
-    class PartitionedHashTable : HashTableBase {
+    class PartitionedHashTable final : HashTableBase {
     public:
 
-        data_ptr_t ht_array;
+        data_ptr_t allocation;
+        ht_slot_t *ht;
         uint64_t capacity;
         uint64_t capacity_mask;
 
@@ -25,46 +30,52 @@ namespace duckdb {
         MemoryManager &memory_manager;
 
         PartitionedHashTable(uint64_t number_of_records, MemoryManager &memory_manager) : memory_manager(memory_manager) {
-            capacity = next_power_of_two(2 * number_of_records);
-            uint64_t ht_size = capacity * sizeof(uint64_t);
-            ht_array = memory_manager.allocate(ht_size);
-            std::memset(ht_array, 0, ht_size);
+            capacity = NextPowerOfTwo(2 * number_of_records);
+            const uint64_t ht_size = capacity * sizeof(ht_slot_t);
+            allocation = memory_manager.allocate(ht_size);
+            ht = reinterpret_cast<ht_slot_t*>(allocation);
+            std::memset(allocation, 0, ht_size);
 
             capacity_mask = capacity - 1;
         }
 
         void InsertAll(RowLayout &layout, uint8_t partition_bits, uint64_t hash_idx) override {
             const uint64_t partition_count = 1 << partition_bits;
+
+            Vector hashes_v(LogicalType::HASH);
+            column_t hash_col_idx = layout.format.types.size() - 1;
+
             for (uint64_t partition_idx = 0; partition_idx < partition_count; partition_idx++) {
                 RowLayoutIterator layout_iterator(layout, partition_idx);
-                while (layout_iterator.HasNext()) {
-                    DataChunk &chunk = layout_iterator.Next();
-                    Vector &hash_v = chunk.data[hash_idx];
-                    Insert(chunk, hash_v, partition_idx, partition_bits);
+                IteratorStep state;
+                while (layout_iterator.Next(state)) {
+                    layout.Gather(state.partition_step.row_pointer, hash_col_idx, state.partition_step.count, hashes_v);
+                    Insert(hashes_v, state, partition_idx, partition_bits);
                 }
             }
         }
 
-        void Insert(DataChunk &keys, Vector &hashes_v, uint64_t partition_idx, uint8_t partition_bits) {
+        void Insert(Vector &hashes_v, IteratorStep &state, uint64_t partition_idx, uint8_t partition_bits) {
 
-            auto partition_size = capacity >> partition_bits;
-            auto partition_mask = partition_size - 1;
-            auto partition_offset = partition_idx * partition_size;
+            const auto partition_size = capacity >> partition_bits;
+            const auto partition_mask = partition_size - 1;
+            const auto partition_offset = partition_idx * partition_size;
 
             // perform linear probing
-            auto keys_data = FlatVector::GetData<uint64_t>(keys.data[0]);
+            idx_t count = state.partition_step.count;
             auto hashes_data = FlatVector::GetData<uint64_t>(hashes_v);
+            auto row_pointer_data = FlatVector::GetData<data_ptr_t>(state.partition_step.row_pointer);
 
-            elements += keys.size();
+            elements += count;
 
-            for (uint64_t i = 0; i < keys.size(); i++) {
-                auto key = keys_data[i];
+            for (uint64_t i = 0; i < count; i++) {
+                auto row_pointer = row_pointer_data[i];
                 auto hash = hashes_data[i];
                 auto idx = (hash & partition_mask) + partition_offset;
 
                 while (true) {
-                    if (ht_array[idx] == 0) {
-                        ht_array[idx] = key;
+                    if (ht[idx] == 0) {
+                        ht[idx] = cast_pointer_to_uint64(row_pointer);
                         break;
                     }
                     collisions++;
@@ -84,7 +95,7 @@ namespace duckdb {
         }
 
         void Free() override {
-            memory_manager.deallocate(ht_array);
+            memory_manager.deallocate(allocation);
         }
     };
 }
