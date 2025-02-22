@@ -16,11 +16,12 @@
 typedef uint64_t ht_slot_t;
 
 namespace duckdb {
-    class PartitionedHashTable final : HashTableBase {
+    class PartitionedHashTable : HashTableBase {
     public:
 
         data_ptr_t allocation;
         ht_slot_t *ht;
+        uint64_t number_of_records;
         uint64_t capacity;
         uint64_t capacity_mask;
 
@@ -29,14 +30,17 @@ namespace duckdb {
 
         MemoryManager &memory_manager;
 
-        PartitionedHashTable(uint64_t number_of_records, MemoryManager &memory_manager) : memory_manager(memory_manager) {
+        PartitionedHashTable(uint64_t number_of_records_p, MemoryManager &memory_manager) : memory_manager(memory_manager) {
+            number_of_records = number_of_records_p;
             capacity = NextPowerOfTwo(2 * number_of_records);
+            capacity_mask = capacity - 1;
+        }
+
+        void InitializeHT() override {
             const uint64_t ht_size = capacity * sizeof(ht_slot_t);
             allocation = memory_manager.allocate(ht_size);
             ht = reinterpret_cast<ht_slot_t*>(allocation);
             std::memset(allocation, 0, ht_size);
-
-            capacity_mask = capacity - 1;
         }
 
         void InsertAll(RowLayout &layout, uint8_t partition_bits, uint64_t hash_idx) override {
@@ -55,7 +59,7 @@ namespace duckdb {
             }
         }
 
-        void Insert(Vector &hashes_v, IteratorStep &state, uint64_t partition_idx, uint8_t partition_bits) {
+        virtual void Insert(Vector &hashes_v, IteratorStep &state, uint64_t partition_idx, uint8_t partition_bits) {
 
             const auto partition_size = capacity >> partition_bits;
             const auto partition_mask = partition_size - 1;
@@ -88,6 +92,10 @@ namespace duckdb {
 
         uint64_t GetCapacity() const override {
             return capacity;
+        }
+
+        uint64_t GetHTSize(uint64_t n_partitions) const override {
+            return (capacity * sizeof(ht_slot_t)) / n_partitions;
         }
 
         double GetCollisionRate() const override {

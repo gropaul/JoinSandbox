@@ -51,20 +51,35 @@ void test_materialization(uint8_t partition_bits, HashTableType ht_type) {
     std::cout << "Bits=" << static_cast<int>(partition_bits) << ' ';
     std::cout << "Partition=" << partition_duration << "ms ";
 
+
+
     const auto ht_start = high_resolution_clock::now();
 
     HashTableBase *hash_table = HashTableFactory(ht_type, layout.row_count, mm);
-    hash_table->InsertAll(layout, partition_bits, hash_col_idx);
+    hash_table->InitializeHT();
+    if (ht_type == LINEAR_PROBING_PARTITIONED_COMPRESSED) {
+        const auto copy_start = high_resolution_clock::now();
+        RowLayout continious_layout = layout.CopyIntoContinuous(mm);
+        const auto copy_duration = time(copy_start);
+        std::cout << "Copy=" << copy_duration << "ms ";
+
+        hash_table->InsertAll(continious_layout, 0, 0);
+        continious_layout.Free();
+
+    } else {
+        hash_table->InsertAll(layout, partition_bits, hash_col_idx);
+    }
 
     const auto build_duration = time(ht_start);
     std::cout << "Build=" << build_duration << "ms ";
     const auto total_duration = time(start);
     std::cout << "Total=" << total_duration << "ms ";
 
-    std::cout << "Collisions=" << hash_table->GetCollisionRate() << " HTSize=" << BytesToString(hash_table->GetCapacity() * sizeof(ht_slot_t)) << " HTPartitionSize=" << BytesToString((hash_table->GetCapacity() >> partition_bits) * sizeof(ht_slot_t)) << '\n';
+    std::cout << "Collisions=" << hash_table->GetCollisionRate() << " HTSize=" << BytesToString(hash_table->GetHTSize(1)) << " HTPartitionSize=" << BytesToString(hash_table->GetHTSize(1 << partition_bits)) << '\n';
 
     // layout.Print();
     layout.Free();
+
     hash_table->Free();
 
 }
@@ -74,9 +89,16 @@ int main() {
     const uint64_t N_RUNS = 3;
     for (uint64_t run = 0; run < N_RUNS; run++) {
         std::cout << "*********** Run " << run << " ***********" << '\n';
+
+        std::cout << "LINEAR_PROBING_PARTITIONED_COMPRESSED" << '\n';
+        for (uint8_t i = 0; i < 9; i += 2) {
+            test_materialization(i, LINEAR_PROBING_PARTITIONED_COMPRESSED);
+        }
+
         std::cout << "LINEAR_PROBING_PARTITIONED" << '\n';
         for (uint8_t i = 0; i < 9; i += 2) {
             test_materialization(i, LINEAR_PROBING_PARTITIONED);
         }
+
     }
 }

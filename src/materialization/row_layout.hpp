@@ -53,7 +53,6 @@ namespace duckdb {
         SegmentPosition segment_position;
         //! The state within the partition
         PartitionIteratorStep partition_step;
-
     };
 
 
@@ -72,23 +71,36 @@ namespace duckdb {
         const vector<gather_function_t> &gather_functions;
         MemoryManager &memory_manager;
 
-        explicit RowLayoutPartition(idx_t radix,
+        explicit RowLayoutPartition(const idx_t radix,
                                     const vector<scatter_function_t> &scatter_functions,
                                     const vector<gather_function_t> &gather_functions,
                                     const RowLayoutFormat &format, MemoryManager &memory_manager)
+            : RowLayoutPartition(radix, scatter_functions, gather_functions, format, memory_manager, PARTITION_SIZE) {
+        }
+
+        explicit RowLayoutPartition(const idx_t radix,
+                                    const vector<scatter_function_t> &scatter_functions,
+                                    const vector<gather_function_t> &gather_functions,
+                                    const RowLayoutFormat &format, MemoryManager &memory_manager,
+                                    const idx_t allocation_size)
             : radix(radix), row_count(0), current_write_offset(0), format(format),
               scatter_functions(scatter_functions), gather_functions(gather_functions), memory_manager(memory_manager) {
-            data = memory_manager.allocate(PARTITION_SIZE);
+            data = memory_manager.allocate(allocation_size);
         }
 
         bool CanFit(const DataChunk &chunk) const {
-            auto chunk_count = chunk.size();
-            auto chunk_size = chunk_count * format.size;
+            const auto chunk_count = chunk.size();
+            const auto chunk_size = chunk_count * format.size;
             return current_write_offset + chunk_size <= PARTITION_SIZE;
         }
 
         bool CanSink(const DataChunk &chunk) const {
             return CanFit(chunk);
+        }
+
+        void CopyTo(const data_ptr_t start, const idx_t copy_count, const data_ptr_t target) const {
+            const auto copy_size = copy_count * format.size;
+            std::memcpy(target, start, copy_size);
         }
 
         void Sink(const DataChunk &chunk, const Vector &hashes_v, const SelectionVector &sel, const idx_t count) {
@@ -123,7 +135,8 @@ namespace duckdb {
                     row_pointers[i] = data + i * format.size;
                 }
 
-                gather_function(row_pointers_v, *FlatVector::IncrementalSelectionVector(), row_count, format.offsets[col_idx], target);
+                gather_function(row_pointers_v, *FlatVector::IncrementalSelectionVector(), row_count,
+                                format.offsets[col_idx], target);
                 target.Print(row_count);
             }
         }
@@ -151,7 +164,6 @@ namespace duckdb {
         }
 
         bool Next(PartitionIteratorStep &state) {
-
             if (!HasNext()) {
                 return false;
             }
@@ -168,7 +180,7 @@ namespace duckdb {
             state.start_offset = current_row_offset;
 
             const auto row_pointers = FlatVector::GetData<data_ptr_t>(state.row_pointer);
-            for  (idx_t i = 0; i < next_count; i++) {
+            for (idx_t i = 0; i < next_count; i++) {
                 row_pointers[i] = start_ptr + i * row_width;
             }
             current_row_offset += next_count;
@@ -195,7 +207,7 @@ namespace duckdb {
                 partitions_copy_sel.emplace_back(STANDARD_VECTOR_SIZE);
                 vector<RowLayoutPartition> partition_chain;
                 partition_chain.emplace_back(radix, scatter_functions, gather_functions, format, memory_manager);
-                partion_chains.emplace_back(partition_chain);
+                partition_chains.emplace_back(partition_chain);
             }
         }
 
@@ -204,7 +216,7 @@ namespace duckdb {
 
         vector<column_t> key_columns;
         RowLayoutFormat format;
-        vector<vector<RowLayoutPartition> > partion_chains;
+        vector<vector<RowLayoutPartition> > partition_chains;
         vector<scatter_function_t> scatter_functions;
         vector<gather_function_t> gather_functions;
 
@@ -248,7 +260,7 @@ namespace duckdb {
             // sink the data into the partitions and reset the copy count
             for (idx_t i = 0; i < (1 << partition_bits); i++) {
                 // get the last partition
-                auto &chain = partion_chains[i];
+                auto &chain = partition_chains[i];
                 auto &last_partition = chain[chain.size() - 1];
                 if (last_partition.CanSink(chunk)) {
                     last_partition.Sink(chunk, hash_v, partitions_copy_sel[i], partition_copy_count[i]);
@@ -267,11 +279,41 @@ namespace duckdb {
             D_ASSERT(result.GetType() == col_type);
 
             const auto gather_function = gather_functions[col_idx];
-            gather_function(row_pointers, *FlatVector::IncrementalSelectionVector(), count, format.offsets[col_idx], result);
+            gather_function(row_pointers, *FlatVector::IncrementalSelectionVector(), count, format.offsets[col_idx],
+                            result);
+        }
+
+        RowLayout CopyIntoContinuous(MemoryManager &memory_manager) {
+            auto needed_size = row_count * format.size;
+
+            RowLayout new_layout(format.types, key_columns, 0, memory_manager);
+            auto &last_chain = new_layout.partition_chains[0];
+            last_chain[0].Free();
+            last_chain.clear();
+
+            last_chain.emplace_back(0, scatter_functions, gather_functions, format, memory_manager, needed_size);
+            auto &partition_copy = last_chain[0];
+
+            partition_copy.row_count = row_count;
+
+            const auto row_width = format.size;
+            data_ptr_t current_ptr = partition_copy.data;
+
+            for (auto &other_chain: partition_chains) {
+                for (auto &other_partition: other_chain) {
+                    if (other_partition.row_count == 0) {
+                        continue;
+                    }
+                    other_partition.CopyTo(other_partition.data, other_partition.row_count, current_ptr);
+                    current_ptr += other_partition.row_count * row_width;
+                }
+            }
+            return new_layout;
+
         }
 
         void Free() const {
-            for (auto &partition_chain: partion_chains) {
+            for (auto &partition_chain: partition_chains) {
                 for (auto &partition: partition_chain) {
                     partition.Free();
                 }
@@ -280,7 +322,7 @@ namespace duckdb {
 
         void Print() const {
             idx_t partition_idx = 0;
-            for (const auto &partition_chain: partion_chains) {
+            for (const auto &partition_chain: partition_chains) {
                 std::cerr << "Partition Chain " << partition_idx << '\n';
                 for (const auto &partition: partition_chain) {
                     partition.Print();
@@ -309,7 +351,7 @@ namespace duckdb {
             iterate_one_chain = false;
             // Create an iterator for the first partition in chain 0
             partition_iterator = make_uniq<RowLayoutPartitionIterator>(
-                layout.partion_chains[partition_idx][partition_segment_idx]
+                layout.partition_chains[partition_idx][partition_segment_idx]
             );
         }
 
@@ -320,21 +362,23 @@ namespace duckdb {
             iterate_one_chain = true;
             // Create an iterator for the first partition in the specified chain
             partition_iterator = make_uniq<RowLayoutPartitionIterator>(
-                layout.partion_chains[partition_idx][partition_segment_idx]
+                layout.partition_chains[partition_idx][partition_segment_idx]
             );
         }
 
         bool HasNext() const {
             if (iterate_one_chain) {
-                const auto current_chain_size = layout.partion_chains[partition_idx].size();
+                const auto current_chain_size = layout.partition_chains[partition_idx].size();
                 // If at last partition of the chain, just check if there's more data
                 if (partition_segment_idx == current_chain_size - 1) {
                     return partition_iterator->HasNext();
                 }
+                // if we overflow the chain, there's no more data
+                return partition_idx < layout.partition_chains.size();
             } else {
                 // If at the last chain and last partition, check if there's more data
-                if (partition_idx == layout.partion_chains.size() - 1 &&
-                    partition_segment_idx == layout.partion_chains[partition_idx].size() - 1) {
+                if (partition_idx == layout.partition_chains.size() - 1 &&
+                    partition_segment_idx == layout.partition_chains[partition_idx].size() - 1) {
                     return partition_iterator->HasNext();
                 }
             }
@@ -343,7 +387,6 @@ namespace duckdb {
         }
 
         bool Next(IteratorStep &step) {
-
             if (!HasNext()) {
                 return false;
             }
@@ -357,21 +400,21 @@ namespace duckdb {
             partition_segment_idx++;
             if (iterate_one_chain) {
                 // Single chain mode
-                if (partition_segment_idx < layout.partion_chains[partition_idx].size()) {
+                if (partition_segment_idx < layout.partition_chains[partition_idx].size()) {
                     partition_iterator = make_uniq<RowLayoutPartitionIterator>(
-                        layout.partion_chains[partition_idx][partition_segment_idx]
+                        layout.partition_chains[partition_idx][partition_segment_idx]
                     );
                     partition_iterator->Next(step.partition_step);
                 }
             } else {
                 // Multi-chain mode
-                if (partition_segment_idx >= layout.partion_chains[partition_idx].size()) {
+                if (partition_segment_idx >= layout.partition_chains[partition_idx].size()) {
                     partition_idx++;
                     partition_segment_idx = 0;
                 }
-                if (partition_idx < layout.partion_chains.size()) {
+                if (partition_idx < layout.partition_chains.size()) {
                     partition_iterator = make_uniq<RowLayoutPartitionIterator>(
-                        layout.partion_chains[partition_idx][partition_segment_idx]
+                        layout.partition_chains[partition_idx][partition_segment_idx]
                     );
                     partition_iterator->Next(step.partition_step);
                 }

@@ -21,7 +21,15 @@ namespace duckdb {
 
         virtual uint64_t GetCapacity() const {
             throw std::runtime_error("Not implemented");
+        }
 
+        virtual void InitializeHT() {
+            throw std::runtime_error("Not implemented");
+        }
+
+        //! Size of the hash table in bytes
+        virtual uint64_t GetHTSize(uint64_t n_partitions) const {
+            throw std::runtime_error("Not implemented");
         }
 
         virtual void Free() {
