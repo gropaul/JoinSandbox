@@ -26,9 +26,7 @@ namespace duckdb {
     public:
 
         static inline constexpr uint64_t GetSlotMask(const uint64_t bytes_per_value) {
-            constexpr uint64_t one = 1;
-            const uint64_t mask = (one << (bytes_per_value * 8)) - 1;
-            return mask;
+            return (1ULL << (bytes_per_value * 8)) - 1;
         }
     };
 
@@ -47,41 +45,31 @@ namespace duckdb {
 
         static inline constexpr uint64_t GetPowerOfTwo(const uint64_t value) {
             // we already know that the value is a power of two, we can't use a loop
-            double power = log2(value);
-            return static_cast<uint64_t>(power);
+            return static_cast<uint64_t>(std::log2(value));
         }
 
-        static inline constexpr uint64_t GetCompressedOffset(const uint64_t offset) {
+        static inline uint64_t GetCompressedOffset(const uint64_t offset) {
             if (IsPowerOfTwo(bytes_per_value)) {
                 return offset << GetPowerOfTwo(bytes_per_value);
             } else {
-                const uint64_t byte_offset = offset * bytes_per_value;
-                return byte_offset;
+                return offset * bytes_per_value;
             }
         }
 
-        static inline constexpr uint64_t ReadRawValueAtPointer(const data_ptr_t ptr) {
-            const auto *ptr_uint64 = reinterpret_cast<uint64_t *>(ptr);
-            return *ptr_uint64;
+        static inline constexpr uint64_t ReadRawValueAtPointer(data_ptr_t ptr) {
+            return *reinterpret_cast<uint64_t *>(ptr);
         }
 
-        static inline void WriteRawValueAtPointer(const data_ptr_t ptr, const uint64_t value) {
+        static inline void WriteRawValueAtPointer(data_ptr_t ptr, const uint64_t value) {
             auto *ptr_uint64 = reinterpret_cast<uint64_t *>(ptr);
             *ptr_uint64 = value;
         }
 
-        static inline constexpr uint64_t ReadValueAtOffset(data_ptr_t start_pointer, const uint64_t offset) {
+        static inline uint64_t ReadValueAtOffset(data_ptr_t start_pointer, const uint64_t offset) {
             const uint64_t byte_offset = GetCompressedOffset(offset);
             data_ptr_t ptr = start_pointer + byte_offset;
             const auto raw_value = ReadRawValueAtPointer(ptr);
-            // if (raw_value != 0) {
-            //     std::cout << "ReadValueAtOffset: " << offset << " " << raw_value << '\n';
-            // }
             const uint64_t value = (raw_value & SLOT_MASK);
-
-            // if (value != 0) {
-            //     std::cout << "ReadValueAtOffset: " << offset << " " << value << '\n';
-            // }
             return value;
         }
 
@@ -176,7 +164,7 @@ namespace duckdb {
         }
 
         void InitializeHT() override {
-            double bits_float = log2(static_cast<double>(number_of_records));
+            double bits_float = std::log2(static_cast<double>(number_of_records));
             const auto bits_per_value = static_cast<uint64_t>(floor(bits_float));
             bytes_per_value = (bits_per_value + 7) / 8;
 
