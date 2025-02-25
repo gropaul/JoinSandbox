@@ -35,6 +35,10 @@ namespace duckdb {
         virtual void Free() {
             throw std::runtime_error("Not implemented");
         }
+
+        virtual void Print() const {
+            throw std::runtime_error("Not implemented");
+        }
     };
 }
 

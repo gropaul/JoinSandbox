@@ -105,6 +105,13 @@ namespace duckdb {
         void Free() override {
             memory_manager.deallocate(allocation);
         }
+
+        void Print() const override {
+            std::cout << "\nCapacity=" << capacity << " Elements=" << elements << " Collisions=" << collisions << '\n';
+            for (uint64_t i = 0; i < capacity; i++) {
+                std::cout << "ht[" << i << "]=" << ht[i] << '\n';
+            }
+        }
     };
 }
 
