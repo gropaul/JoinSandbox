@@ -15,5 +15,3 @@ add_executable(HTBench main.cpp
         src/materialization/memory_manager.cpp
         src/materialization/scatter.hpp)
 target_link_libraries(HTBench duckdb)
-
-add_executable(RandomTest tests/random_ht.cpp)
