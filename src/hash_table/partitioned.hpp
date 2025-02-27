@@ -7,6 +7,7 @@
 #include "utils.hpp"
 #include "base.hpp"
 #include <iostream>
+#include <cmath>
 
 #include "base.hpp"
 #include "materialization/row_layout.hpp"
