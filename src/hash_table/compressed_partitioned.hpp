@@ -189,14 +189,14 @@ namespace duckdb {
             }
         }
 
-        static data_ptr_t CopyRow(data_ptr_t row_source_ptr, data_ptr_t row_target_ptr, uint64_t row_width, uint64_t next_pointer_offset) {
+        static data_ptr_t CopyRow(uint8_t* __restrict row_source_ptr, uint8_t* __restrict row_target_ptr, uint64_t row_width, uint64_t next_pointer_offset) {
 
             if (row_width >= 32) {
                 // copy the data in blocks of 32 bytes
                 constexpr idx_t COPY_BLOCK_SIZE = 32;
 
-                data_ptr_t __restrict row_source_end = row_source_ptr + row_width - COPY_BLOCK_SIZE;
-                data_ptr_t __restrict row_target_end = row_target_ptr + row_width - COPY_BLOCK_SIZE;
+                uint8_t* __restrict row_source_end = row_source_ptr + row_width - COPY_BLOCK_SIZE;
+                uint8_t* __restrict row_target_end = row_target_ptr + row_width - COPY_BLOCK_SIZE;
 
                 for (idx_t j = 0; j < row_width; j += COPY_BLOCK_SIZE) {
                     data_ptr_t __restrict source_ptr = std::min(row_source_ptr + j, row_source_end);
