@@ -13,7 +13,7 @@ uint64_t time(time_point<high_resolution_clock> start, const string &name = "") 
     return duration.count();
 }
 
-const string BUILD_QUERY = "SELECT CAST(range AS uint32) as key, key, key FROM range(10_000_000);";
+const string BUILD_QUERY = "SELECT CAST((range) AS uint64) as key FROM range(1_000_000);";
 const string PROBE_QUERY = "SELECT CAST(range AS uint32) as key, key, key FROM range(10_000_000);";
 
 void test_materialization(uint8_t partition_bits, HashTableType ht_type, Connection &con) {
@@ -46,7 +46,7 @@ void test_materialization(uint8_t partition_bits, HashTableType ht_type, Connect
 
     const auto ht_start = high_resolution_clock::now();
 
-    HashTableBase *hash_table = HashTableFactory(ht_type, layout.row_count, mm);
+    HashTableBase *hash_table = HashTableFactory(ht_type, layout.row_count, mm, keys);
     hash_table->InitializeHT();
     hash_table->InsertAll(layout, partition_bits, hash_col_idx);
     time(ht_start, "Build");
@@ -74,7 +74,7 @@ int main() {
 
     // three runs
     const uint64_t N_RUNS = 1;
-    const uint64_t START_PARTITION_BITS = 0;
+    const uint64_t START_PARTITION_BITS = 3;
     const uint64_t MAX_PARTITION_BITS = 9;
     const uint64_t PARTITION_STEP_SIZE = 1;
     for (uint64_t run = 0; run < N_RUNS; run++) {

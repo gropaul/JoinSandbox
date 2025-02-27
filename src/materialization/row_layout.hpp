@@ -69,13 +69,13 @@ namespace duckdb {
 
         const vector<scatter_function_t> &scatter_functions;
         const vector<gather_function_t> &gather_functions;
-        const vector<equality_function_t> &equality_functions;
+        const vector<vector_equality_function_t> &equality_functions_v;
         MemoryManager &memory_manager;
 
         explicit RowLayoutPartition(const idx_t radix,
                                     const vector<scatter_function_t> &scatter_functions,
                                     const vector<gather_function_t> &gather_functions,
-                                    const vector<equality_function_t> &equality_functions,
+                                    const vector<vector_equality_function_t> &equality_functions,
                                     const RowLayoutFormat &format, MemoryManager &memory_manager)
             : RowLayoutPartition(radix, scatter_functions, gather_functions, equality_functions, format, memory_manager, PARTITION_SIZE) {
         }
@@ -83,11 +83,11 @@ namespace duckdb {
         explicit RowLayoutPartition(const idx_t radix,
                                     const vector<scatter_function_t> &scatter_functions,
                                     const vector<gather_function_t> &gather_functions,
-                                    const vector<equality_function_t> &equality_functions,
+                                    const vector<vector_equality_function_t> &equality_functions,
                                     const RowLayoutFormat &format, MemoryManager &memory_manager,
                                     const idx_t allocation_size)
             : radix(radix), row_count(0), current_write_offset(0), format(format),
-              scatter_functions(scatter_functions), gather_functions(gather_functions), equality_functions(equality_functions), memory_manager(memory_manager) {
+              scatter_functions(scatter_functions), gather_functions(gather_functions), equality_functions_v(equality_functions), memory_manager(memory_manager) {
             data = memory_manager.allocate(allocation_size);
         }
 
@@ -223,7 +223,7 @@ namespace duckdb {
         vector<vector<RowLayoutPartition> > partition_chains;
         vector<scatter_function_t> scatter_functions;
         vector<gather_function_t> gather_functions;
-        vector<equality_function_t> equality_functions;
+        vector<vector_equality_function_t> equality_functions;
 
         Vector hash_v;
         vector<uint64_t> partition_copy_count;

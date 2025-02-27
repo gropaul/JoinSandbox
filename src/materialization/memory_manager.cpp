@@ -10,6 +10,7 @@
 #include "memory_manager.hpp"
 
 namespace duckdb {
+
     data_ptr_t MemoryManager::allocate(std::size_t size) {
         void *ptr = std::malloc(size);
         if (!ptr) {

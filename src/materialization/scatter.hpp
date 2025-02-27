@@ -43,9 +43,10 @@ namespace duckdb {
         }
     }
 
-    typedef idx_t (*equality_function_t)(const Vector &left, const Vector &row_pointers, const SelectionVector &sel,
+    typedef idx_t (*vector_equality_function_t)(const Vector &left, const Vector &row_pointers, const SelectionVector &sel,
                                     const idx_t count, const idx_t column_offset,
                                     SelectionVector &result);
+
     template <typename DATA_TYPE>
     idx_t Equal(const Vector &left, const Vector &row_pointers, const SelectionVector &sel,
                 const idx_t count, const idx_t column_offset, SelectionVector &result_sel) {
@@ -74,6 +75,15 @@ namespace duckdb {
         }
         // Return how many matches were found
         return match_count;
+    }
+
+    typedef bool (*row_equality_function_t)(data_ptr_t left, data_ptr_t right, const idx_t column_offset);
+
+    template <typename DATA_TYPE>
+    bool RowEqual(data_ptr_t left, data_ptr_t right, const idx_t column_offset) {
+        auto left_val  = Load<DATA_TYPE>(left + column_offset);
+        auto right_val = Load<DATA_TYPE>(right + column_offset);
+        return left_val == right_val;
     }
 
     static scatter_function_t GetScatterFunction(const LogicalType &type) {
@@ -130,7 +140,7 @@ namespace duckdb {
         }
     }
 
-    static equality_function_t GetEqualityFunction(const LogicalType &type) {
+    static vector_equality_function_t GetEqualityFunction(const LogicalType &type) {
         switch (type.id()) {
             case LogicalTypeId::BIGINT:
                 return Equal<int64_t>;
@@ -154,6 +164,33 @@ namespace duckdb {
                 return Equal<double>;
             default:
                 throw NotImplementedException("Equality function not implemented for type");
+        }
+    }
+
+    static row_equality_function_t GetRowEqualityFunction(const LogicalType &type) {
+        switch (type.id()) {
+            case LogicalTypeId::BIGINT:
+                return RowEqual<int64_t>;
+            case LogicalTypeId::UBIGINT:
+                return RowEqual<uint64_t>;
+            case LogicalTypeId::INTEGER:
+                return RowEqual<int32_t>;
+            case LogicalTypeId::UINTEGER:
+                return RowEqual<uint32_t>;
+            case LogicalTypeId::SMALLINT:
+                return RowEqual<int16_t>;
+            case LogicalTypeId::USMALLINT:
+                return RowEqual<uint16_t>;
+            case LogicalTypeId::TINYINT:
+                return RowEqual<int8_t>;
+            case LogicalTypeId::UTINYINT:
+                return RowEqual<uint8_t>;
+            case LogicalTypeId::FLOAT:
+                return RowEqual<float>;
+            case LogicalTypeId::DOUBLE:
+                return RowEqual<double>;
+            default:
+                throw NotImplementedException("Row equality function not implemented for type");
         }
     }
 };
