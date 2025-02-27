@@ -69,7 +69,7 @@ void test_materialization(uint8_t partition_bits, HashTableType ht_type, Connect
 }
 
 int main() {
-    DuckDB db("/Users/paul/micro.duckdb");
+    DuckDB db(nullptr);
     Connection con(db);
 
     // three runs
