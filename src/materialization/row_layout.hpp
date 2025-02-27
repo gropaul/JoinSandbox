@@ -69,22 +69,25 @@ namespace duckdb {
 
         const vector<scatter_function_t> &scatter_functions;
         const vector<gather_function_t> &gather_functions;
+        const vector<equality_function_t> &equality_functions;
         MemoryManager &memory_manager;
 
         explicit RowLayoutPartition(const idx_t radix,
                                     const vector<scatter_function_t> &scatter_functions,
                                     const vector<gather_function_t> &gather_functions,
+                                    const vector<equality_function_t> &equality_functions,
                                     const RowLayoutFormat &format, MemoryManager &memory_manager)
-            : RowLayoutPartition(radix, scatter_functions, gather_functions, format, memory_manager, PARTITION_SIZE) {
+            : RowLayoutPartition(radix, scatter_functions, gather_functions, equality_functions, format, memory_manager, PARTITION_SIZE) {
         }
 
         explicit RowLayoutPartition(const idx_t radix,
                                     const vector<scatter_function_t> &scatter_functions,
                                     const vector<gather_function_t> &gather_functions,
+                                    const vector<equality_function_t> &equality_functions,
                                     const RowLayoutFormat &format, MemoryManager &memory_manager,
                                     const idx_t allocation_size)
             : radix(radix), row_count(0), current_write_offset(0), format(format),
-              scatter_functions(scatter_functions), gather_functions(gather_functions), memory_manager(memory_manager) {
+              scatter_functions(scatter_functions), gather_functions(gather_functions), equality_functions(equality_functions), memory_manager(memory_manager) {
             data = memory_manager.allocate(allocation_size);
         }
 
@@ -200,13 +203,14 @@ namespace duckdb {
             for (auto &type: types) {
                 scatter_functions.push_back(GetScatterFunction(type));
                 gather_functions.push_back(GetGatherFunction(type));
+                equality_functions.push_back(GetEqualityFunction(type));
             }
 
             for (idx_t radix = 0; radix < (1 << partition_bits); radix++) {
                 partition_copy_count.emplace_back(0);
                 partitions_copy_sel.emplace_back(STANDARD_VECTOR_SIZE);
                 vector<RowLayoutPartition> partition_chain;
-                partition_chain.emplace_back(radix, scatter_functions, gather_functions, format, memory_manager);
+                partition_chain.emplace_back(radix, scatter_functions, gather_functions, equality_functions, format, memory_manager);
                 partition_chains.emplace_back(partition_chain);
             }
         }
@@ -219,6 +223,7 @@ namespace duckdb {
         vector<vector<RowLayoutPartition> > partition_chains;
         vector<scatter_function_t> scatter_functions;
         vector<gather_function_t> gather_functions;
+        vector<equality_function_t> equality_functions;
 
         Vector hash_v;
         vector<uint64_t> partition_copy_count;
@@ -265,7 +270,7 @@ namespace duckdb {
                 if (last_partition.CanSink(chunk)) {
                     last_partition.Sink(chunk, hash_v, partitions_copy_sel[i], partition_copy_count[i]);
                 } else {
-                    chain.emplace_back(i, scatter_functions, gather_functions, format, memory_manager);
+                    chain.emplace_back(i, scatter_functions, gather_functions, equality_functions, format, memory_manager);
                     auto &new_partition = chain[chain.size() - 1];
                     new_partition.Sink(chunk, hash_v, partitions_copy_sel[i], partition_copy_count[i]);
                 }
@@ -291,7 +296,7 @@ namespace duckdb {
             last_chain[0].Free();
             last_chain.clear();
 
-            last_chain.emplace_back(0, scatter_functions, gather_functions, format, memory_manager, needed_size);
+            last_chain.emplace_back(0, scatter_functions, gather_functions, equality_functions, format, memory_manager, needed_size);
             auto &partition_copy = last_chain[0];
 
             partition_copy.row_count = row_count;
@@ -424,6 +429,7 @@ namespace duckdb {
             return true;
         }
     };
+
 };
 
 

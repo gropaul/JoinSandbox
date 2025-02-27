@@ -15,6 +15,10 @@ namespace duckdb {
             throw std::runtime_error("Not implemented");
         }
 
+        virtual void PostProcessBuild(RowLayout &layout, uint8_t partition_bits) {
+            throw std::runtime_error("Not implemented");
+        }
+
         virtual double GetCollisionRate() const {
             throw std::runtime_error("Not implemented");
         }

@@ -19,7 +19,7 @@ namespace duckdb {
     class PartitionedHashTable : HashTableBase {
     public:
 
-        data_ptr_t allocation;
+        data_ptr_t ht_allocation;
         ht_slot_t *ht;
         uint64_t number_of_records;
         uint64_t capacity;
@@ -38,9 +38,9 @@ namespace duckdb {
 
         void InitializeHT() override {
             const uint64_t ht_size = capacity * sizeof(ht_slot_t);
-            allocation = memory_manager.allocate(ht_size);
-            ht = reinterpret_cast<ht_slot_t*>(allocation);
-            std::memset(allocation, 0, ht_size);
+            ht_allocation = memory_manager.allocate(ht_size);
+            ht = reinterpret_cast<ht_slot_t*>(ht_allocation);
+            std::memset(ht_allocation, 0, ht_size);
         }
 
         void InsertAll(RowLayout &layout, uint8_t partition_bits, uint64_t hash_idx) override {
@@ -103,7 +103,11 @@ namespace duckdb {
         }
 
         void Free() override {
-            memory_manager.deallocate(allocation);
+            memory_manager.deallocate(ht_allocation);
+        }
+
+        void PostProcessBuild(RowLayout &layout, uint8_t partition_bits) override {
+            // nothing to do
         }
 
         void Print() const override {
