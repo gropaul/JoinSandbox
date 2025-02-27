@@ -20,7 +20,7 @@ void test_materialization(uint8_t partition_bits, HashTableType ht_type) {
 
     const vector<column_t> keys = {0};
     // const auto result = con.Query("SELECT key, key, key FROM build_10_percent;");
-    const auto result = con.Query("SELECT range as key, key, key FROM range(2_000_000);");
+    const auto result = con.Query("SELECT range as key, key, key FROM range(100_000_000);");
 
     if (result->HasError()) {
         throw std::runtime_error(result->GetError());

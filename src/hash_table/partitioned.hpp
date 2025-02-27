@@ -94,7 +94,7 @@ namespace duckdb {
             return capacity;
         }
 
-        uint64_t GetHTSize(uint64_t n_partitions) const override {
+        uint64_t GetHTSize(const uint64_t n_partitions) const override {
             return (capacity * sizeof(ht_slot_t)) / n_partitions;
         }
 

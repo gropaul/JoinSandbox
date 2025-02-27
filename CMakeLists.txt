@@ -10,6 +10,7 @@ include_directories(src)
 link_directories(src)
 
 add_executable(HTBench main.cpp
+        src/hash_table/compressed_partitioned.hpp
         src/materialization/row_layout.hpp
         src/materialization/memory_manager.hpp
         src/materialization/memory_manager.cpp
