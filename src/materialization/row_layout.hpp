@@ -254,7 +254,8 @@ namespace duckdb {
                 if (partition_bits == 0) {
                     partition_idx = 0;
                 } else {
-                    partition_idx = (hash >> (sizeof(uint64_t) * 8 - partition_bits));
+                    // take the upper n bits of the hash
+                    partition_idx = hash >> (64 - partition_bits);
                 }
                 auto &copy_sel = partitions_copy_sel[partition_idx];
                 auto &copy_count = partition_copy_count[partition_idx];
@@ -286,35 +287,6 @@ namespace duckdb {
             const auto gather_function = gather_functions[col_idx];
             gather_function(row_pointers, *FlatVector::IncrementalSelectionVector(), count, format.offsets[col_idx],
                             result);
-        }
-
-        RowLayout CopyIntoContinuous(MemoryManager &memory_manager) {
-            auto needed_size = row_count * format.size;
-
-            RowLayout new_layout(format.types, key_columns, 0, memory_manager);
-            auto &last_chain = new_layout.partition_chains[0];
-            last_chain[0].Free();
-            last_chain.clear();
-
-            last_chain.emplace_back(0, scatter_functions, gather_functions, equality_functions, format, memory_manager, needed_size);
-            auto &partition_copy = last_chain[0];
-
-            partition_copy.row_count = row_count;
-
-            const auto row_width = format.size;
-            data_ptr_t current_ptr = partition_copy.data;
-
-            for (auto &other_chain: partition_chains) {
-                for (auto &other_partition: other_chain) {
-                    if (other_partition.row_count == 0) {
-                        continue;
-                    }
-                    other_partition.CopyTo(other_partition.data, other_partition.row_count, current_ptr);
-                    current_ptr += other_partition.row_count * row_width;
-                }
-            }
-            return new_layout;
-
         }
 
         void Free() const {
