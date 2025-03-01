@@ -181,8 +181,8 @@ namespace duckdb {
         }
 
         //! Probes the HT and if the key hits and full slot, add it to the list of keys to compare
-        inline idx_t GetKeysToCompare(const idx_t remaining_count, const SelectionVector &remaining_sel,
-                                      const Vector &offsets_v, ProbeState &state) {
+        virtual idx_t GetKeysToCompare(const idx_t remaining_count, const SelectionVector &remaining_sel,
+                                      const Vector &offsets_v, ProbeState &state) const {
             const auto offsets = FlatVector::GetData<uint64_t>(state.offsets_v);
             const auto rhs_ptrs = FlatVector::GetData<data_ptr_t>(state.rhs_row_pointers_v);
 
@@ -215,7 +215,7 @@ namespace duckdb {
 
             const auto keys_v = left.data[key_columns[0]];
             D_ASSERT(keys_v.GetType() == LogicalType::UBIGINT);
-            auto found_ptrs = FlatVector::GetData<data_ptr_t>(state.found_row_pointers_v);
+            const auto found_ptrs = FlatVector::GetData<data_ptr_t>(state.found_row_pointers_v);
             const auto rhs_ptrs = FlatVector::GetData<data_ptr_t>(state.rhs_row_pointers_v);
             const auto offsets = FlatVector::GetData<uint64_t>(state.offsets_v);
 
@@ -300,13 +300,13 @@ namespace duckdb {
             uint64_t advanced_count = 0;
             // advance the pointers
             for (idx_t i = 0; i < found_count; i++) {
-                auto found_idx = found_sel.get_index(i);
-                auto next_ptr_location = found_ptrs[found_idx] + hash_col_offset;
-                auto next_ptr = Load<data_ptr_t>(next_ptr_location);
-
-                found_ptrs[found_idx] = next_ptr;
-                found_sel.set_index(advanced_count, found_idx);
-                advanced_count += next_ptr != nullptr;;
+                // auto found_idx = found_sel.get_index(i);
+                // auto next_ptr_location = found_ptrs[found_idx] + hash_col_offset;
+                // auto next_ptr = Load<data_ptr_t>(next_ptr_location);
+                //
+                // found_ptrs[found_idx] = next_ptr;
+                // found_sel.set_index(advanced_count, found_idx);
+                // advanced_count += next_ptr != nullptr;;
             }
 
             if (advanced_count == 0) {

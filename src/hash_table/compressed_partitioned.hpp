@@ -149,6 +149,7 @@ namespace duckdb {
     public:
         unique_ptr<RowLayoutPartition> continuous_partition;
         uint64_t bytes_per_value;
+        uint64_t row_width;
 
         data_ptr_t ht_allocation_compressed;
 
@@ -189,14 +190,14 @@ namespace duckdb {
             }
         }
 
-        static data_ptr_t CopyRow(uint8_t* __restrict row_source_ptr, uint8_t* __restrict row_target_ptr, uint64_t row_width, uint64_t next_pointer_offset) {
-
+        static data_ptr_t CopyRow(uint8_t * __restrict row_source_ptr, uint8_t * __restrict row_target_ptr,
+                                  uint64_t row_width, uint64_t next_pointer_offset) {
             if (row_width >= 32) {
                 // copy the data in blocks of 32 bytes
                 constexpr idx_t COPY_BLOCK_SIZE = 32;
 
-                uint8_t* __restrict row_source_end = row_source_ptr + row_width - COPY_BLOCK_SIZE;
-                uint8_t* __restrict row_target_end = row_target_ptr + row_width - COPY_BLOCK_SIZE;
+                uint8_t * __restrict row_source_end = row_source_ptr + row_width - COPY_BLOCK_SIZE;
+                uint8_t * __restrict row_target_end = row_target_ptr + row_width - COPY_BLOCK_SIZE;
 
                 for (idx_t j = 0; j < row_width; j += COPY_BLOCK_SIZE) {
                     data_ptr_t __restrict source_ptr = std::min(row_source_ptr + j, row_source_end);
@@ -211,7 +212,66 @@ namespace duckdb {
             }
 
             return cast_uint64_to_pointer(Load<uint64_t>(row_source_ptr + next_pointer_offset));
+        }
 
+        uint64_t GetHTSize(const uint64_t n_partitions) const override {
+            return (capacity * bytes_per_value) / n_partitions;
+        }
+
+        template<idx_t BYTES_PER_VALUE>
+        idx_t GetKeysToCompareInternal(const idx_t remaining_count, const SelectionVector &remaining_sel,
+                                       const Vector &offsets_v, ProbeState &state) const {
+            const auto offsets = FlatVector::GetData<uint64_t>(state.offsets_v);
+            const auto rhs_ptrs = FlatVector::GetData<data_ptr_t>(state.rhs_row_pointers_v);
+
+            auto &key_comp_sel = state.key_comp_sel;
+            idx_t key_comp_count = 0;
+
+            using Constants = CompressedConstants<BYTES_PER_VALUE>;
+            data_ptr_t start_ptr = ht_allocation_compressed;
+            data_ptr_t continuous_start = continuous_partition->data;
+            uint64_t row_width = continuous_partition->format.size - sizeof(uint64_t);
+
+            // find empty or filled slots, add filled slots to the key_comp_sel
+            for (idx_t idx = 0; idx < remaining_count; idx++) {
+                const auto remaining_idx = state.remaining_sel.get_index(idx);
+                const auto ht_offset = offsets[remaining_idx];
+                while (true) {
+                    const uint64_t ht_slot = Constants::ReadValueAtOffset(start_ptr, ht_offset);
+                    if (ht_slot == 0) {
+                        break;
+                    }
+                    // we need to compare the keys
+                    rhs_ptrs[remaining_idx] = continuous_start + ht_slot * row_width;
+                    key_comp_sel.set_index(key_comp_count, remaining_idx);
+                    key_comp_count++;
+                    break;
+                }
+            }
+
+            return key_comp_count;
+        }
+
+        idx_t GetKeysToCompare(const idx_t remaining_count, const SelectionVector &remaining_sel,
+                               const Vector &offsets_v, ProbeState &state) const override {
+            switch (bytes_per_value) {
+                case 1:
+                    return GetKeysToCompareInternal<1>(remaining_count, remaining_sel, offsets_v, state);
+                case 2:
+                    return GetKeysToCompareInternal<2>(remaining_count, remaining_sel, offsets_v, state);
+                case 3:
+                    return GetKeysToCompareInternal<3>(remaining_count, remaining_sel, offsets_v, state);
+                case 4:
+                    return GetKeysToCompareInternal<4>(remaining_count, remaining_sel, offsets_v, state);
+                case 5:
+                    return GetKeysToCompareInternal<5>(remaining_count, remaining_sel, offsets_v, state);
+                case 6:
+                    return GetKeysToCompareInternal<6>(remaining_count, remaining_sel, offsets_v, state);
+                case 7:
+                    return GetKeysToCompareInternal<7>(remaining_count, remaining_sel, offsets_v, state);
+                default:
+                    throw std::runtime_error("Unsupported bytes per value: " + std::to_string(bytes_per_value));
+            }
         }
 
         template<idx_t BYTES_PER_VALUE>
@@ -221,7 +281,7 @@ namespace duckdb {
             idx_t next_pointer_offset = layout.format.offsets[layout.format.types.size() - 1];
 
             // we don't need the hash anymore
-            uint64_t row_width = layout.format.size - sizeof(uint64_t);
+            row_width = layout.format.size - sizeof(uint64_t);
             uint64_t continuous_size = row_width * layout.row_count;
             continuous_partition = make_uniq<RowLayoutPartition>(0, layout.scatter_functions, layout.gather_functions,
                                                                  layout.equality_functions,
@@ -269,11 +329,12 @@ namespace duckdb {
             for (size_t ht_idx = 0; ht_idx < capacity; ht_idx++) {
                 const bool is_occupied = ht[ht_idx] != 0;
                 const uint64_t row_offset = prefix_sum[ht_idx];
-                Constants::WriteValueAtOffset(ht_allocation_compressed, ht_idx, row_offset);
 
                 if (!is_occupied) {
                     continue;
                 }
+                // todo: this must go before the !is_occupied check to encode the chain length
+                Constants::WriteValueAtOffset(ht_allocation_compressed, ht_idx, row_offset);
 
                 data_ptr_t __restrict row_source_ptr = cast_uint64_to_pointer(ht[ht_idx]);
                 data_ptr_t __restrict row_target_ptr = continuous_start + row_offset * row_width;
@@ -282,7 +343,6 @@ namespace duckdb {
                     row_source_ptr = CopyRow(row_source_ptr, row_target_ptr, row_width, next_pointer_offset);
                     row_target_ptr += row_width;
                 } while (row_source_ptr != nullptr);
-
             }
             memory_manager.deallocate(ht_allocation);
             memory_manager.deallocate(prefix_sum_ptr);

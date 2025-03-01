@@ -13,8 +13,8 @@ uint64_t time(time_point<high_resolution_clock> start, const string &name = "") 
     return duration.count();
 }
 
-const string BUILD_QUERY = "SELECT CAST((range) AS uint64) as key, CAST(key AS uint32) as payload, payload, payload, payload FROM range(5_000_000) ORDER BY hash(range);";
-const string PROBE_QUERY = "SELECT CAST((range / 10) AS uint64) as key FROM range(50_000_000) ORDER BY hash(range);";
+const string BUILD_QUERY = "SELECT CAST((range) AS uint64) as key, CAST(key AS uint64) as payload, payload, payload, payload FROM range(50_000_000) ORDER BY hash(range);";
+const string PROBE_QUERY = "SELECT CAST((range) AS uint64) as key FROM range(100_000_000) ORDER BY hash(range);";
 
 void test_materialization(uint8_t partition_bits, HashTableType ht_type, Connection &con) {
     const vector<column_t> keys = {0};
@@ -102,15 +102,15 @@ int main() {
     // three runs
     const uint64_t N_RUNS = 1;
     const uint64_t START_PARTITION_BITS = 3;
-    const uint64_t MAX_PARTITION_BITS = 9;
+    const uint64_t MAX_PARTITION_BITS = 5;
     const uint64_t PARTITION_STEP_SIZE = 1;
     for (uint64_t run = 0; run < N_RUNS; run++) {
         std::cout << "*********** Run " << run << " ***********" << '\n';
-        //
-        // for (uint8_t i = START_PARTITION_BITS; i < MAX_PARTITION_BITS; i += PARTITION_STEP_SIZE) {
-        //     std::cout << "PARTITIONED_COMPRESSED: ";
-        //     test_materialization(i, LINEAR_PROBING_PARTITIONED_COMPRESSED, con);
-        // }
+
+        for (uint8_t i = START_PARTITION_BITS; i < MAX_PARTITION_BITS; i += PARTITION_STEP_SIZE) {
+            std::cout << "PARTITIONED_COMPRESSED: ";
+            test_materialization(i, LINEAR_PROBING_PARTITIONED_COMPRESSED, con);
+        }
         for (uint8_t i = START_PARTITION_BITS; i < MAX_PARTITION_BITS; i += PARTITION_STEP_SIZE) {
             std::cout << "PARTITIONED:            ";
             test_materialization(i, LINEAR_PROBING_PARTITIONED, con);
