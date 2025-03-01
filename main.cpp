@@ -13,8 +13,8 @@ uint64_t time(time_point<high_resolution_clock> start, const string &name = "") 
     return duration.count();
 }
 
-const string BUILD_QUERY = "SELECT CAST((range) AS uint64) as key FROM range(100_000_000);";
-const string PROBE_QUERY = "SELECT CAST((range) AS uint64) as key FROM range(100_000_000);";
+const string BUILD_QUERY = "SELECT CAST((range) AS uint64) as key, CAST(key AS uint32) as payload, payload, payload, payload FROM range(5_000_000) ORDER BY hash(range);";
+const string PROBE_QUERY = "SELECT CAST((range / 10) AS uint64) as key FROM range(50_000_000) ORDER BY hash(range);";
 
 void test_materialization(uint8_t partition_bits, HashTableType ht_type, Connection &con) {
     const vector<column_t> keys = {0};

@@ -34,7 +34,8 @@ namespace duckdb {
 
         explicit ProbeState(): offsets_v(LogicalType::HASH), found_row_pointers_v(LogicalType::POINTER),
                                rhs_row_pointers_v(LogicalType::POINTER), found_count(0),
-                               found_sel(STANDARD_VECTOR_SIZE) ,remaining_sel(STANDARD_VECTOR_SIZE), key_equal_sel(STANDARD_VECTOR_SIZE),
+                               found_sel(STANDARD_VECTOR_SIZE), remaining_sel(STANDARD_VECTOR_SIZE),
+                               key_equal_sel(STANDARD_VECTOR_SIZE),
                                key_comp_sel(STANDARD_VECTOR_SIZE) {
         }
     };
@@ -163,8 +164,8 @@ namespace duckdb {
             // std::cout << "Partition=" << partition_idx << " Min=" << min_idx << " Max=" << max_idx << '\n';
         }
 
-        static void GetHTOffset(DataChunk &left, Vector &hashes_v, const vector<column_t> &key_columns,
-                                const size_t capacity_bit_shift) {
+        static void GetInitialHTOffset(DataChunk &left, Vector &hashes_v, const vector<column_t> &key_columns,
+                                       const size_t capacity_bit_shift) {
             idx_t count = left.size();
             auto &key = left.data[key_columns[0]];
             VectorOperations::Hash(key, hashes_v, count);
@@ -179,16 +180,44 @@ namespace duckdb {
             }
         }
 
+        //! Probes the HT and if the key hits and full slot, add it to the list of keys to compare
+        inline idx_t GetKeysToCompare(const idx_t remaining_count, const SelectionVector &remaining_sel,
+                                      const Vector &offsets_v, ProbeState &state) {
+            const auto offsets = FlatVector::GetData<uint64_t>(state.offsets_v);
+            const auto rhs_ptrs = FlatVector::GetData<data_ptr_t>(state.rhs_row_pointers_v);
+
+            auto &key_comp_sel = state.key_comp_sel;
+            idx_t key_comp_count = 0;
+
+            // find empty or filled slots, add filled slots to the key_comp_sel
+            for (idx_t idx = 0; idx < remaining_count; idx++) {
+                auto remaining_idx = state.remaining_sel.get_index(idx);
+                auto ht_offset = offsets[remaining_idx];
+                while (true) {
+                    auto ht_slot = ht[ht_offset];
+                    if (ht_slot == 0) {
+                        break;
+                    }
+
+                    // we need to compare the keys
+                    rhs_ptrs[remaining_idx] = cast_uint64_to_pointer(ht_slot);
+                    key_comp_sel.set_index(key_comp_count, remaining_idx);
+                    key_comp_count++;
+                    break;
+                }
+            }
+
+            return key_comp_count;
+        }
+
         idx_t GetRowPointers(DataChunk &left, ProbeState &state) {
+            GetInitialHTOffset(left, state.offsets_v, key_columns, capacity_bit_shift);
 
-            GetHTOffset(left, state.offsets_v, key_columns, capacity_bit_shift);
-            auto offsets = FlatVector::GetData<uint64_t>(state.offsets_v);
-
-            auto keys_v = left.data[key_columns[0]];
+            const auto keys_v = left.data[key_columns[0]];
             D_ASSERT(keys_v.GetType() == LogicalType::UBIGINT);
-            auto keys = FlatVector::GetData<uint64_t>(keys_v);
             auto found_ptrs = FlatVector::GetData<data_ptr_t>(state.found_row_pointers_v);
-            auto rhs_ptrs = FlatVector::GetData<data_ptr_t>(state.rhs_row_pointers_v);
+            const auto rhs_ptrs = FlatVector::GetData<data_ptr_t>(state.rhs_row_pointers_v);
+            const auto offsets = FlatVector::GetData<uint64_t>(state.offsets_v);
 
             // initialize the remaining selection vector
             idx_t remaining_count = left.size();
@@ -199,29 +228,12 @@ namespace duckdb {
             idx_t &found_count = state.found_count;
             found_count = 0;
 
+            auto &key_comp_sel = state.key_comp_sel;
+
             while (remaining_count != 0) {
 
-                auto &key_comp_sel = state.key_comp_sel;
                 idx_t key_comp_count = 0;
-
-                // find empty or filled slots, add filled slots to the key_comp_sel
-                for (idx_t idx = 0; idx < remaining_count; idx++) {
-
-                    auto remaining_idx = state.remaining_sel.get_index(idx);
-
-                    auto ht_offset = offsets[remaining_idx];
-                    while (true) {
-                        auto ht_slot = ht[ht_offset];
-                        if (ht_slot == 0) {
-                            break;
-                        } else {
-                            rhs_ptrs[remaining_idx] = cast_uint64_to_pointer(ht_slot);
-                            key_comp_sel.set_index(key_comp_count, remaining_idx);
-                            key_comp_count++;
-                            break;
-                        }
-                    }
-                }
+                key_comp_count = GetKeysToCompare(remaining_count, state.remaining_sel, state.offsets_v, state);
 
                 // compare the keys in the key_comp_sel with the keys in the hash table
                 const auto offset = key_row_offsets[0];
@@ -231,7 +243,7 @@ namespace duckdb {
 
                 // add the equal keys to the found pointers
                 for (idx_t i = 0; i < equality_count; i++) {
-                    auto sel_idx = state.key_equal_sel.get_index(i);
+                    const auto sel_idx = state.key_equal_sel.get_index(i);
                     found_ptrs[sel_idx] = rhs_ptrs[sel_idx];
 
                     state.found_sel.set_index(found_count, sel_idx);
@@ -239,7 +251,7 @@ namespace duckdb {
                 }
 
                 // add the unequal keys to the key_comp_sel, increment their ht_offset
-                idx_t unequal_count = key_comp_count - equality_count;
+                const idx_t unequal_count = key_comp_count - equality_count;
                 for (idx_t i = 0; i < unequal_count; i++) {
                     const auto sel_idx = state.remaining_sel.get_index(i);
                     auto &ht_offset = offsets[sel_idx];
