@@ -19,7 +19,7 @@ namespace duckdb {
             throw std::runtime_error("Not implemented");
         }
 
-        virtual void Probe(DataChunk &left, DataChunk &result) {
+        virtual OperatorResultType Probe(DataChunk &left, DataChunk &result) {
             throw std::runtime_error("Not implemented");
         }
 

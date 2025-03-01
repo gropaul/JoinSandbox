@@ -45,11 +45,11 @@ namespace duckdb {
 
     typedef idx_t (*vector_equality_function_t)(const Vector &left, const Vector &row_pointers, const SelectionVector &sel,
                                     const idx_t count, const idx_t column_offset,
-                                    SelectionVector &result);
+                                    SelectionVector &equal, SelectionVector &un_equal);
 
     template <typename DATA_TYPE>
     idx_t Equal(const Vector &left, const Vector &row_pointers, const SelectionVector &sel,
-                const idx_t count, const idx_t column_offset, SelectionVector &result_sel) {
+                const idx_t count, const idx_t column_offset, SelectionVector &equal, SelectionVector &un_equal) {
         // Obtain pointers to the actual data in 'left' and the row pointers
         auto left_data = FlatVector::GetData<DATA_TYPE>(left);
         auto row_ptrs  = FlatVector::GetData<data_ptr_t>(row_pointers);
@@ -69,8 +69,11 @@ namespace duckdb {
             // Compare against the element in 'left' at source_idx
             if (left_data[source_idx] == stored_val) {
                 // Write the matching index to the result selection vector
-                result_sel.set_index(match_count, source_idx);
+                equal.set_index(match_count, source_idx);
                 match_count++;
+            } else {
+                // Write the non-matching index to the result selection vector
+                un_equal.set_index(i - match_count, source_idx);
             }
         }
         // Return how many matches were found

@@ -13,8 +13,8 @@ uint64_t time(time_point<high_resolution_clock> start, const string &name = "") 
     return duration.count();
 }
 
-const string BUILD_QUERY = "SELECT CAST((range) AS uint64) as key FROM range(10_000_000);";
-const string PROBE_QUERY = "SELECT CAST(range AS uint64) as key FROM range(10_000_000);";
+const string BUILD_QUERY = "SELECT CAST((range) AS uint64) as key FROM range(100_000_000);";
+const string PROBE_QUERY = "SELECT CAST((range) AS uint64) as key FROM range(100_000_000);";
 
 void test_materialization(uint8_t partition_bits, HashTableType ht_type, Connection &con) {
     const vector<column_t> keys = {0};
@@ -79,9 +79,11 @@ void test_materialization(uint8_t partition_bits, HashTableType ht_type, Connect
     result.Initialize(Allocator::DefaultAllocator(), result_types);
 
     while (next_chunk) {
-        hash_table->Probe(*next_chunk, result);
+        OperatorResultType op_result = hash_table->Probe(*next_chunk, result);
         count += result.size();
-        next_chunk = probe_result->Fetch();
+        if (op_result == OperatorResultType::NEED_MORE_INPUT) {
+            next_chunk = probe_result->Fetch();
+        }
     }
     time(probe_start, "Probe");
     std::cout << "Count=" << count << ' ';
