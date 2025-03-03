@@ -23,7 +23,11 @@ namespace duckdb {
             throw std::runtime_error("Not implemented");
         }
 
-        virtual double GetCollisionRate() const {
+        virtual double GetCollisionRateBuild() const {
+            throw std::runtime_error("Not implemented");
+        }
+
+        virtual double GetCollisionRateProbe() const {
             throw std::runtime_error("Not implemented");
         }
 

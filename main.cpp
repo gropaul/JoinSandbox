@@ -13,8 +13,8 @@ uint64_t time(time_point<high_resolution_clock> start, const string &name = "") 
     return duration.count();
 }
 
-const string BUILD_QUERY = "SELECT CAST((range) AS uint64) as key, CAST(key AS uint64) as payload, payload, payload, payload FROM range(50_000_000) ORDER BY hash(range);";
-const string PROBE_QUERY = "SELECT CAST((range) AS uint64) as key FROM range(100_000_000) ORDER BY hash(range);";
+const string BUILD_QUERY = "FROM build_100m LIMIT 1000;";
+const string PROBE_QUERY = "FROM probe_100m LIMIT 10000;";
 
 void test_materialization(uint8_t partition_bits, HashTableType ht_type, Connection &con) {
     const vector<column_t> keys = {0};
@@ -56,9 +56,6 @@ void test_materialization(uint8_t partition_bits, HashTableType ht_type, Connect
     time(ht_post_process_start, "PostProcess");
 
     time(start, "TotalBuild");
-    std::cout << "Collisions=" << hash_table->GetCollisionRate() << " HTSize=" <<
-            BytesToString(hash_table->GetHTSize(1)) << " HTPartitionSize=" << BytesToString(
-                hash_table->GetHTSize(1 << partition_bits)) << ' ';
 
     // *** GETTING THE PROBE DATA ***
 
@@ -85,8 +82,13 @@ void test_materialization(uint8_t partition_bits, HashTableType ht_type, Connect
             next_chunk = probe_result->Fetch();
         }
     }
+
+    std::cout << "BColl=" << hash_table->GetCollisionRateBuild() << " PColl=" << hash_table->GetCollisionRateProbe() <<
+            " HTSize=" <<
+            BytesToString(hash_table->GetHTSize(1)) << " HTPSize=" << BytesToString(
+                hash_table->GetHTSize(1 << partition_bits)) << ' ';
     time(probe_start, "Probe");
-    std::cout << "Count=" << count << ' ';
+    std::cout << "RCount=" << count << ' ';
 
     std::cout << '\n';
 
@@ -96,21 +98,21 @@ void test_materialization(uint8_t partition_bits, HashTableType ht_type, Connect
 }
 
 int main() {
-    DuckDB db(nullptr);
+    DuckDB db("./micro.duckdb");
     Connection con(db);
 
     // three runs
-    const uint64_t N_RUNS = 1;
+    const uint64_t N_RUNS = 2;
     const uint64_t START_PARTITION_BITS = 3;
     const uint64_t MAX_PARTITION_BITS = 5;
     const uint64_t PARTITION_STEP_SIZE = 1;
     for (uint64_t run = 0; run < N_RUNS; run++) {
         std::cout << "*********** Run " << run << " ***********" << '\n';
 
-        for (uint8_t i = START_PARTITION_BITS; i < MAX_PARTITION_BITS; i += PARTITION_STEP_SIZE) {
-            std::cout << "PARTITIONED_COMPRESSED: ";
-            test_materialization(i, LINEAR_PROBING_PARTITIONED_COMPRESSED, con);
-        }
+        // for (uint8_t i = START_PARTITION_BITS; i < MAX_PARTITION_BITS; i += PARTITION_STEP_SIZE) {
+        //     std::cout << "PARTITIONED_COMPRESSED: ";
+        //     test_materialization(i, LINEAR_PROBING_PARTITIONED_COMPRESSED, con);
+        // }
         for (uint8_t i = START_PARTITION_BITS; i < MAX_PARTITION_BITS; i += PARTITION_STEP_SIZE) {
             std::cout << "PARTITIONED:            ";
             test_materialization(i, LINEAR_PROBING_PARTITIONED, con);

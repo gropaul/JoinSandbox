@@ -25,7 +25,7 @@ namespace duckdb {
             return capacity;
         }
 
-        double GetCollisionRate() const override {
+        double GetCollisionRateBuild() const override {
             return static_cast<double>(collisions) / static_cast<double>(elements);
         }
 

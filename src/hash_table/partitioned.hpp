@@ -50,8 +50,11 @@ namespace duckdb {
         uint64_t capacity_mask;
         uint64_t capacity_bit_shift;
 
-        uint64_t elements = 0;
-        uint64_t collisions = 0;
+        uint64_t elements_build = 0;
+        uint64_t collisions_build = 0;
+
+        uint64_t elements_probe = 0;
+        uint64_t collisions_probe = 0;
 
         MemoryManager &memory_manager;
         const vector<column_t> &key_columns;
@@ -93,7 +96,7 @@ namespace duckdb {
             gather_functions = layout.gather_functions;
             format = &layout.format;
 
-            for (auto key_col_idx: key_columns) {
+            for (const auto key_col_idx: key_columns) {
                 LogicalType type = layout.format.types[key_col_idx];
                 row_eq_functions.push_back(GetRowEqualityFunction(type));
                 vector_eq_functions.push_back(GetEqualityFunction(type));
@@ -120,16 +123,16 @@ namespace duckdb {
             auto hashes_data = FlatVector::GetData<uint64_t>(hashes_v);
             auto row_pointer_data = FlatVector::GetData<data_ptr_t>(state.partition_step.row_pointer);
 
-            elements += count;
+            elements_build += count;
 
             for (uint64_t i = 0; i < count; i++) {
                 auto lhs_row_pointer = row_pointer_data[i];
                 const auto hash = hashes_data[i];
-                auto idx = hash >> capacity_bit_shift;
+                auto ht_offset = hash >> capacity_bit_shift;
 
                 while (true) {
-                    if (ht[idx] == 0) {
-                        ht[idx] = cast_pointer_to_uint64(lhs_row_pointer);
+                    if (ht[ht_offset] == 0) {
+                        ht[ht_offset] = cast_pointer_to_uint64(lhs_row_pointer);
                         // store zero to mark the end of the chain
                         data_ptr_t next_pointer_location = lhs_row_pointer + hash_col_offset;
                         Store<uint64_t>(0, next_pointer_location);
@@ -138,7 +141,7 @@ namespace duckdb {
                         bool equal = true;
                         for (auto key_col_idx: key_columns) {
                             const auto offset = key_offsets[key_col_idx];
-                            const auto left = cast_uint64_to_pointer(ht[idx]);
+                            const auto left = cast_uint64_to_pointer(ht[ht_offset]);
                             const auto right = lhs_row_pointer;
                             if (!key_equal[key_col_idx](left, right, offset)) {
                                 equal = false;
@@ -147,16 +150,16 @@ namespace duckdb {
                         }
                         if (equal) {
                             // chain the row: for this row to insert, set the current row pointer to the next row pointer
-                            data_ptr_t next_element_pointer = cast_uint64_to_pointer(ht[idx]);
+                            data_ptr_t next_element_pointer = cast_uint64_to_pointer(ht[ht_offset]);
                             data_ptr_t next_pointer_location = lhs_row_pointer + hash_col_offset;
                             // write the next pointer
                             Store<uint64_t>(cast_pointer_to_uint64(next_element_pointer), next_pointer_location);
                             // put the current pointer in the hash table
-                            ht[idx] = cast_pointer_to_uint64(lhs_row_pointer);
+                            ht[ht_offset] = cast_pointer_to_uint64(lhs_row_pointer);
                             break;
                         } else {
-                            collisions++;
-                            idx = (idx + 1) & capacity_mask;
+                            collisions_build++;
+                            ht_offset = (ht_offset + 1) & capacity_mask;
                         }
                     }
                 }
@@ -256,6 +259,7 @@ namespace duckdb {
                     const auto sel_idx = state.remaining_sel.get_index(i);
                     auto &ht_offset = offsets[sel_idx];
                     ht_offset = (ht_offset + 1) & capacity_mask;
+                    collisions_probe ++;
                 }
 
                 remaining_count = unequal_count;
@@ -270,6 +274,7 @@ namespace duckdb {
             auto hash_col_offset = format->offsets[hash_col_idx];
 
             if (needs_new_row_pointers) {
+                elements_probe += left.size();
                 GetRowPointers(left, probe_state);
             }
 
@@ -327,8 +332,12 @@ namespace duckdb {
             return (capacity * sizeof(ht_slot_t)) / n_partitions;
         }
 
-        double GetCollisionRate() const override {
-            return static_cast<double>(collisions) / static_cast<double>(elements);
+        double GetCollisionRateBuild() const override {
+            return static_cast<double>(collisions_build) / static_cast<double>(elements_build);
+        }
+
+        double GetCollisionRateProbe() const override {
+            return static_cast<double>(collisions_probe) / static_cast<double>(elements_probe);
         }
 
         void Free() override {
@@ -340,7 +349,7 @@ namespace duckdb {
         }
 
         void Print() const override {
-            std::cout << "\nCapacity=" << capacity << " Elements=" << elements << " Collisions=" << collisions << '\n';
+            std::cout << "\nCapacity=" << capacity << " Elements=" << elements_build << " BCollisions=" << collisions_build << '\n';
             for (uint64_t i = 0; i < capacity; i++) {
                 std::cout << "ht[" << i << "]=" << ht[i] << '\n';
             }

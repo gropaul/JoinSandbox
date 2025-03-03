@@ -239,6 +239,7 @@ namespace duckdb {
             // create the hash based on the key columns
             const idx_t keys_count = key_columns.size();
             auto &key = chunk.data[key_columns[0]];
+            D_ASSERT(key.GetType() == LogicalType::UBIGINT);
             VectorOperations::Hash(key, hash_v, count);
 
             for (idx_t i = 1; i < keys_count; i++) {
