@@ -129,7 +129,6 @@ namespace duckdb {
                 auto lhs_row_pointer = row_pointer_data[i];
                 const auto hash = hashes_data[i];
                 auto ht_offset = hash >> capacity_bit_shift;
-
                 while (true) {
                     if (ht[ht_offset] == 0) {
                         ht[ht_offset] = cast_pointer_to_uint64(lhs_row_pointer);
@@ -279,7 +278,6 @@ namespace duckdb {
             }
 
             // load the current row pointers, then load their next pointer
-
             auto &found_sel = probe_state.found_sel;
             auto &found_count = probe_state.found_count;
             auto found_ptrs = FlatVector::GetData<data_ptr_t>(probe_state.found_row_pointers_v);

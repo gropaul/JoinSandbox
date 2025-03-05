@@ -160,7 +160,7 @@ namespace duckdb {
 
         void PostProcessBuild(RowLayout &layout, uint8_t partition_bits) override {
             const double bits_float = std::log2(static_cast<double>(number_of_records));
-            const auto bits_per_value = static_cast<uint64_t>(floor(bits_float));
+            const auto bits_per_value = static_cast<uint64_t>(ceil(bits_float));
             bytes_per_value = (bits_per_value + 7) / 8;
 
             switch (bytes_per_value) {
@@ -193,7 +193,6 @@ namespace duckdb {
         static data_ptr_t CopyRow(uint8_t * __restrict row_source_ptr, uint8_t * __restrict row_target_ptr,
                                   uint64_t row_width, uint64_t next_pointer_offset) {
             if (row_width >= 32) {
-                // copy the data in blocks of 32 bytes
                 constexpr idx_t COPY_BLOCK_SIZE = 32;
 
                 uint8_t * __restrict row_source_end = row_source_ptr + row_width - COPY_BLOCK_SIZE;
@@ -211,7 +210,8 @@ namespace duckdb {
                 std::memcpy(row_target_ptr, row_source_ptr, row_width);
             }
 
-            return cast_uint64_to_pointer(Load<uint64_t>(row_source_ptr + next_pointer_offset));
+            return nullptr;
+            // return cast_uint64_to_pointer(Load<uint64_t>(row_source_ptr + next_pointer_offset));
         }
 
         uint64_t GetHTSize(const uint64_t n_partitions) const override {
@@ -274,11 +274,109 @@ namespace duckdb {
             }
         }
 
+        data_ptr_t CreatePrefixSum(const RowLayout &layout, const idx_t capacity,
+                                   const idx_t next_pointer_offset) const {
+            data_ptr_t prefix_sum_ptr = memory_manager.allocate(sizeof(uint32_t) * capacity);
+
+            float entries_per_slot = static_cast<float>(layout.row_count) / static_cast<float>(capacity);
+
+
+            auto *prefix_sum = reinterpret_cast<uint32_t *>(prefix_sum_ptr);
+
+            constexpr uint32_t BLOCK_SIZE = 4096;
+
+            uint16_t mask[BLOCK_SIZE];
+
+            uint32_t block_prefix_sum = 0;
+
+            float max_error = 0;
+            float min_error = 0;
+
+            for (idx_t block_idx = 0; block_idx < capacity; block_idx += BLOCK_SIZE) {
+                idx_t n_filled = 0;
+
+
+                for (idx_t element_idx = 0; element_idx < BLOCK_SIZE; element_idx++) {
+                    const idx_t ht_idx = block_idx + element_idx;
+                    const bool is_full = ht[ht_idx] != 0;
+                    mask[element_idx] = is_full;
+                    n_filled += is_full;
+                }
+
+                // get the running sum of the mask
+                for (idx_t element_idx = 1; element_idx < BLOCK_SIZE; element_idx++) {
+                    mask[element_idx] += mask[element_idx - 1];
+                }
+
+                float local_max_error = 0;
+                float local_min_error = 0;
+
+                for (idx_t element_idx = 0; element_idx < BLOCK_SIZE; element_idx++) {
+                    const idx_t ht_idx = block_idx + element_idx;
+                    const uint32_t local_prefix_sum = mask[element_idx];
+                    const uint32_t global_prefix_sum = block_prefix_sum + local_prefix_sum;
+                    prefix_sum[ht_idx] = global_prefix_sum;
+
+                    // ht_idx * entries_per_slot is the expected value
+                    // const float expected_value = static_cast<float>(ht_idx) * entries_per_slot;
+                    // const auto actual_value = static_cast<float>(global_prefix_sum);
+                    // const auto error = expected_value - actual_value;
+                    // local_max_error = std::max(max_error, error);
+                    // local_min_error = std::min(min_error, error);
+                }
+
+                max_error = std::max(max_error, local_max_error);
+                min_error = std::min(min_error, local_min_error);
+
+                block_prefix_sum += mask[BLOCK_SIZE - 1];
+            }
+
+            std::cout << "MaxError=" << max_error << " MinError=" << min_error << ' ';
+            return prefix_sum_ptr;
+        }
+
+
+        template<idx_t BYTES_PER_VALUE>
+         __attribute__((noinline)) void FillContinuousLayout(const uint32_t *prefix_sum, data_ptr_t continuous_start,
+                                    const idx_t capacity, const idx_t next_pointer_offset) {
+
+            using Constants = CompressedConstants<BYTES_PER_VALUE>;
+
+            for (size_t ht_offset = 0; ht_offset < capacity; ht_offset++) {
+                const bool is_occupied = ht[ht_offset] != 0;
+                const uint32_t row_offset = prefix_sum[ht_offset];
+
+                if (!is_occupied) {
+                    continue;
+                }
+                // todo: this must go before the !is_occupied check to encode the chain length
+                Constants::WriteValueAtOffset(ht_allocation_compressed, ht_offset, row_offset);
+
+                data_ptr_t __restrict row_source_ptr = cast_uint64_to_pointer(ht[ht_offset]);
+                data_ptr_t __restrict row_target_ptr = continuous_start + row_offset * row_width;
+
+                // uint64_t read_offset = Constants::ReadValueAtOffset(ht_allocation_compressed, ht_offset);
+                // D_ASSERT(read_offset == row_offset);
+
+                do {
+                    data_ptr_t next_ptr = CopyRow(row_source_ptr, row_target_ptr, row_width, next_pointer_offset);
+
+                    // check if the first uint64_t at row_source_ptr is the same as the row_target_ptr
+                    // const auto new_value = Load<uint64_t>(row_target_ptr);
+                    // const auto og_value = Load<uint64_t>(row_source_ptr);
+                    // D_ASSERT(new_value == og_value);
+
+                    row_source_ptr = next_ptr;
+                    row_target_ptr += row_width;
+                } while (row_source_ptr != nullptr);
+            }
+        }
+
         template<idx_t BYTES_PER_VALUE>
         void PostProcessBuildIternal(RowLayout &layout, uint8_t partition_bits) {
-            data_ptr_t prefix_sum_ptr = memory_manager.allocate(sizeof(uint32_t) * capacity);
-            auto *prefix_sum = reinterpret_cast<uint32_t *>(prefix_sum_ptr);
             idx_t next_pointer_offset = layout.format.offsets[layout.format.types.size() - 1];
+            data_ptr_t prefix_sum_ptr = CreatePrefixSum(layout, capacity, next_pointer_offset);
+            auto *prefix_sum = reinterpret_cast<uint32_t *>(prefix_sum_ptr);
 
             // we don't need the hash anymore
             row_width = layout.format.size - sizeof(uint64_t);
@@ -289,61 +387,12 @@ namespace duckdb {
                                                                  memory_manager, continuous_size);
             data_ptr_t continuous_start = continuous_partition->data;
 
-            uint32_t current_prefix_sum = 0;
-
-            float entries_per_slot = static_cast<float>(layout.row_count) / static_cast<float>(capacity);
-            uint32_t max_error = 0;
-
-            for (size_t ht_idx = 0; ht_idx < capacity; ht_idx++) {
-                prefix_sum[ht_idx] = current_prefix_sum;
-
-                if (ht[ht_idx] == 0) {
-                    continue;
-                }
-
-                // do pointer chasing to get the chain length
-                idx_t chain_length = 0;
-                data_ptr_t current_ptr = cast_uint64_to_pointer(ht[ht_idx]);
-                while (current_ptr != nullptr) {
-                    chain_length++;
-                    const auto next_ptr_location = current_ptr + next_pointer_offset;
-                    current_ptr = cast_uint64_to_pointer(Load<uint64_t>(next_ptr_location));
-                }
-                current_prefix_sum += chain_length;
-
-                // ht_idx * entries_per_slot is the expected value
-                const float expected_value = static_cast<float>(ht_idx) * entries_per_slot;
-                const auto actual_value = static_cast<float>(current_prefix_sum);
-                const auto abs_error = static_cast<uint32_t>(std::abs(expected_value - actual_value));
-                max_error = std::max(max_error, abs_error);
-            }
-
-            std::cout << "MaxError=" << max_error << ' ';
-
             const uint64_t ht_compressed_size = capacity * BYTES_PER_VALUE + sizeof(uint64_t);
             ht_allocation_compressed = memory_manager.allocate(ht_compressed_size);
             memset(ht_allocation_compressed, 0, ht_compressed_size);
 
-            using Constants = CompressedConstants<BYTES_PER_VALUE>;
+            FillContinuousLayout<BYTES_PER_VALUE>(prefix_sum, continuous_start, capacity, next_pointer_offset);
 
-            for (size_t ht_idx = 0; ht_idx < capacity; ht_idx++) {
-                const bool is_occupied = ht[ht_idx] != 0;
-                const uint64_t row_offset = prefix_sum[ht_idx];
-
-                if (!is_occupied) {
-                    continue;
-                }
-                // todo: this must go before the !is_occupied check to encode the chain length
-                Constants::WriteValueAtOffset(ht_allocation_compressed, ht_idx, row_offset);
-
-                data_ptr_t __restrict row_source_ptr = cast_uint64_to_pointer(ht[ht_idx]);
-                data_ptr_t __restrict row_target_ptr = continuous_start + row_offset * row_width;
-
-                do {
-                    row_source_ptr = CopyRow(row_source_ptr, row_target_ptr, row_width, next_pointer_offset);
-                    row_target_ptr += row_width;
-                } while (row_source_ptr != nullptr);
-            }
             memory_manager.deallocate(ht_allocation);
             memory_manager.deallocate(prefix_sum_ptr);
         }

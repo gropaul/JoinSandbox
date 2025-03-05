@@ -48,11 +48,11 @@ namespace duckdb {
                                     SelectionVector &equal, SelectionVector &un_equal);
 
     template <typename DATA_TYPE>
-    idx_t Equal(const Vector &left, const Vector &row_pointers, const SelectionVector &sel,
-                const idx_t count, const idx_t column_offset, SelectionVector &equal, SelectionVector &un_equal) {
+    idx_t VectorRowEqual(const Vector &left, const Vector &row_pointers, const SelectionVector &sel,
+                const idx_t count, const idx_t column_offset, __restrict SelectionVector &equal, __restrict SelectionVector &un_equal) {
         // Obtain pointers to the actual data in 'left' and the row pointers
-        auto left_data = FlatVector::GetData<DATA_TYPE>(left);
-        auto row_ptrs  = FlatVector::GetData<data_ptr_t>(row_pointers);
+        auto __restrict left_data = FlatVector::GetData<DATA_TYPE>(left);
+        auto __restrict row_ptrs  = FlatVector::GetData<data_ptr_t>(row_pointers);
 
         idx_t match_count = 0;
         for (idx_t i = 0; i < count; i++) {
@@ -83,7 +83,7 @@ namespace duckdb {
     typedef bool (*row_equality_function_t)(data_ptr_t left, data_ptr_t right, const idx_t column_offset);
 
     template <typename DATA_TYPE>
-    bool RowEqual(data_ptr_t left, data_ptr_t right, const idx_t column_offset) {
+    bool RowRowEqual(data_ptr_t left, data_ptr_t right, const idx_t column_offset) {
         auto left_val  = Load<DATA_TYPE>(left + column_offset);
         auto right_val = Load<DATA_TYPE>(right + column_offset);
         return left_val == right_val;
@@ -146,25 +146,25 @@ namespace duckdb {
     static vector_equality_function_t GetEqualityFunction(const LogicalType &type) {
         switch (type.id()) {
             case LogicalTypeId::BIGINT:
-                return Equal<int64_t>;
+                return VectorRowEqual<int64_t>;
             case LogicalTypeId::UBIGINT:
-                return Equal<uint64_t>;
+                return VectorRowEqual<uint64_t>;
             case LogicalTypeId::INTEGER:
-                return Equal<int32_t>;
+                return VectorRowEqual<int32_t>;
             case LogicalTypeId::UINTEGER:
-                return Equal<uint32_t>;
+                return VectorRowEqual<uint32_t>;
             case LogicalTypeId::SMALLINT:
-                return Equal<int16_t>;
+                return VectorRowEqual<int16_t>;
             case LogicalTypeId::USMALLINT:
-                return Equal<uint16_t>;
+                return VectorRowEqual<uint16_t>;
             case LogicalTypeId::TINYINT:
-                return Equal<int8_t>;
+                return VectorRowEqual<int8_t>;
             case LogicalTypeId::UTINYINT:
-                return Equal<uint8_t>;
+                return VectorRowEqual<uint8_t>;
             case LogicalTypeId::FLOAT:
-                return Equal<float>;
+                return VectorRowEqual<float>;
             case LogicalTypeId::DOUBLE:
-                return Equal<double>;
+                return VectorRowEqual<double>;
             default:
                 throw NotImplementedException("Equality function not implemented for type");
         }
@@ -173,25 +173,25 @@ namespace duckdb {
     static row_equality_function_t GetRowEqualityFunction(const LogicalType &type) {
         switch (type.id()) {
             case LogicalTypeId::BIGINT:
-                return RowEqual<int64_t>;
+                return RowRowEqual<int64_t>;
             case LogicalTypeId::UBIGINT:
-                return RowEqual<uint64_t>;
+                return RowRowEqual<uint64_t>;
             case LogicalTypeId::INTEGER:
-                return RowEqual<int32_t>;
+                return RowRowEqual<int32_t>;
             case LogicalTypeId::UINTEGER:
-                return RowEqual<uint32_t>;
+                return RowRowEqual<uint32_t>;
             case LogicalTypeId::SMALLINT:
-                return RowEqual<int16_t>;
+                return RowRowEqual<int16_t>;
             case LogicalTypeId::USMALLINT:
-                return RowEqual<uint16_t>;
+                return RowRowEqual<uint16_t>;
             case LogicalTypeId::TINYINT:
-                return RowEqual<int8_t>;
+                return RowRowEqual<int8_t>;
             case LogicalTypeId::UTINYINT:
-                return RowEqual<uint8_t>;
+                return RowRowEqual<uint8_t>;
             case LogicalTypeId::FLOAT:
-                return RowEqual<float>;
+                return RowRowEqual<float>;
             case LogicalTypeId::DOUBLE:
-                return RowEqual<double>;
+                return RowRowEqual<double>;
             default:
                 throw NotImplementedException("Row equality function not implemented for type");
         }
