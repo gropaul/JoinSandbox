@@ -49,7 +49,7 @@ namespace duckdb {
 
     template <typename DATA_TYPE>
     idx_t VectorRowEqual(const Vector &left, const Vector &row_pointers, const SelectionVector &sel,
-                const idx_t count, const idx_t column_offset, __restrict SelectionVector &equal, __restrict SelectionVector &un_equal) {
+                const idx_t count, const idx_t column_offset, SelectionVector &equal, SelectionVector &un_equal) {
         // Obtain pointers to the actual data in 'left' and the row pointers
         auto __restrict left_data = FlatVector::GetData<DATA_TYPE>(left);
         auto __restrict row_ptrs  = FlatVector::GetData<data_ptr_t>(row_pointers);
