@@ -10,10 +10,11 @@
 #include "duckdb.hpp"
 #include "memory_manager.hpp"
 #include "scatter.hpp"
+#include "aggregates.hpp"
 
 
 namespace duckdb {
-    // 4mb partition size
+    // 8mb partition size
     constexpr idx_t PARTITION_SIZE = 4 * 1024 * 1024;
 
     //! Returns the size of the data type in bytes
@@ -77,7 +78,9 @@ namespace duckdb {
                                     const vector<gather_function_t> &gather_functions,
                                     const vector<vector_equality_function_t> &equality_functions,
                                     const RowLayoutFormat &format, MemoryManager &memory_manager)
-            : RowLayoutPartition(radix, scatter_functions, gather_functions, equality_functions, format, memory_manager, PARTITION_SIZE) {
+            : RowLayoutPartition(radix, scatter_functions, gather_functions, equality_functions,
+                                 format, memory_manager,
+                                 PARTITION_SIZE) {
         }
 
         explicit RowLayoutPartition(const idx_t radix,
@@ -87,7 +90,8 @@ namespace duckdb {
                                     const RowLayoutFormat &format, MemoryManager &memory_manager,
                                     const idx_t allocation_size)
             : radix(radix), row_count(0), current_write_offset(0), format(format),
-              scatter_functions(scatter_functions), gather_functions(gather_functions), equality_functions_v(equality_functions), memory_manager(memory_manager) {
+              scatter_functions(scatter_functions), gather_functions(gather_functions),
+              equality_functions_v(equality_functions), memory_manager(memory_manager) {
             data = memory_manager.allocate(allocation_size);
         }
 
@@ -194,29 +198,41 @@ namespace duckdb {
     class RowLayout {
     public:
         explicit RowLayout(const vector<LogicalType> &types, vector<column_t> key_columns, uint8_t partition_bits,
+                           bool collect_min_max,
                            MemoryManager &memory_manager)
-            : format(types), memory_manager(memory_manager), hash_v(LogicalType::HASH),
-              key_columns(std::move(key_columns)), partition_bits(partition_bits) {
+            : partition_bits(partition_bits), collect_min_max(collect_min_max), key_columns(std::move(key_columns)),
+              format(types),
+              hash_v(LogicalType::HASH), memory_manager(memory_manager) {
             // the last type is the hash
             D_ASSERT(types[types.size() - 1] == LogicalType::HASH);
 
-            for (auto &type: types) {
+            // leave out the hash
+            for (column_t i = 0; i < types.size(); i++) {
+                auto &type = types[i];
                 scatter_functions.push_back(GetScatterFunction(type));
                 gather_functions.push_back(GetGatherFunction(type));
                 equality_functions.push_back(GetEqualityFunction(type));
+
+                // leave out the hash column
+                if (i < types.size() - 1) {
+                    min_max_ranges.push_back(Range());
+                }
             }
 
             for (idx_t radix = 0; radix < (1 << partition_bits); radix++) {
                 partition_copy_count.emplace_back(0);
                 partitions_copy_sel.emplace_back(STANDARD_VECTOR_SIZE);
                 vector<RowLayoutPartition> partition_chain;
-                partition_chain.emplace_back(radix, scatter_functions, gather_functions, equality_functions, format, memory_manager);
+                partition_chain.emplace_back(radix, scatter_functions, gather_functions, equality_functions, format,
+                                             memory_manager);
                 partition_chains.emplace_back(partition_chain);
             }
         }
 
         idx_t partition_bits;
         idx_t row_count = 0;
+        bool collect_min_max;
+        vector<Range> min_max_ranges;
 
         vector<column_t> key_columns;
         RowLayoutFormat format;
@@ -236,11 +252,21 @@ namespace duckdb {
             const idx_t count = chunk.size();
             row_count += count;
 
+            const column_t columns = chunk.ColumnCount();
+
             // create the hash based on the key columns
             const idx_t keys_count = key_columns.size();
             auto &key = chunk.data[key_columns[0]];
             D_ASSERT(key.GetType() == LogicalType::UBIGINT);
             VectorOperations::Hash(key, hash_v, count);
+
+            if (collect_min_max) {
+                for (idx_t i = 0; i <columns; i++) {
+                    auto &min_max = min_max_ranges[i];
+                    auto &column = chunk.data[i];
+                    UpdateRange(column, count, min_max);
+                }
+            }
 
             for (idx_t i = 1; i < keys_count; i++) {
                 auto &combined_key = chunk.data[key_columns[i]];
@@ -272,7 +298,8 @@ namespace duckdb {
                 if (last_partition.CanSink(chunk)) {
                     last_partition.Sink(chunk, hash_v, partitions_copy_sel[i], partition_copy_count[i]);
                 } else {
-                    chain.emplace_back(i, scatter_functions, gather_functions, equality_functions, format, memory_manager);
+                    chain.emplace_back(i,  scatter_functions, gather_functions, equality_functions, format,
+                                       memory_manager);
                     auto &new_partition = chain[chain.size() - 1];
                     new_partition.Sink(chunk, hash_v, partitions_copy_sel[i], partition_copy_count[i]);
                 }
@@ -402,7 +429,6 @@ namespace duckdb {
             return true;
         }
     };
-
 };
 
 

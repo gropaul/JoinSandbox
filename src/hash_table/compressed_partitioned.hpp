@@ -149,7 +149,7 @@ namespace duckdb {
     public:
         unique_ptr<RowLayoutPartition> continuous_partition;
         uint64_t bytes_per_value;
-        uint64_t row_width;
+        uint64_t continuous_row_width;
 
         data_ptr_t ht_allocation_compressed;
 
@@ -190,25 +190,22 @@ namespace duckdb {
             }
         }
 
-        static data_ptr_t CopyRow(uint8_t * __restrict row_source_ptr, uint8_t * __restrict row_target_ptr,
-                                  uint64_t row_width, uint64_t next_pointer_offset) {
-            if (row_width >= 32) {
-                // copy the data in blocks of 32 bytes
-                constexpr idx_t COPY_BLOCK_SIZE = 32;
+        static data_ptr_t CopyCompressedRow(uint8_t * __restrict row_source_ptr, uint8_t * __restrict row_target_ptr,
+                                            const uint64_t row_width, const vector<uint64_t> &value_offsets,
+                                            const vector<uint64_t> &value_offsets_compressed,
+                                            const uint64_t next_pointer_offset,
+                                            const vector<uint8_t> &compressed_value_widths) {
+            column_t n_cols = value_offsets_compressed.size();
+            for (column_t col_idx = 0; col_idx < n_cols; col_idx++) {
+                const auto value_offset = value_offsets[col_idx];
+                const auto value_offset_compressed = value_offsets_compressed[col_idx];
+                const auto compressed_width = compressed_value_widths[col_idx];
 
-                uint8_t * __restrict row_source_end = row_source_ptr + row_width - COPY_BLOCK_SIZE;
-                uint8_t * __restrict row_target_end = row_target_ptr + row_width - COPY_BLOCK_SIZE;
+                const auto value_source_ptr = row_source_ptr + value_offset;
+                const auto value_target_ptr = row_target_ptr + value_offset_compressed;
 
-                for (idx_t j = 0; j < row_width; j += COPY_BLOCK_SIZE) {
-                    data_ptr_t __restrict source_ptr = std::min(row_source_ptr + j, row_source_end);
-                    data_ptr_t __restrict target_ptr = std::min(row_target_ptr + j, row_target_end);
-
-                    std::memcpy(target_ptr, source_ptr, COPY_BLOCK_SIZE);
-                }
-            } else if (row_width == 16) {
-                std::memcpy(row_target_ptr, row_source_ptr, 16);
-            } else {
-                std::memcpy(row_target_ptr, row_source_ptr, row_width);
+                // write the compressed value to the target
+                std::memcpy(value_target_ptr, value_source_ptr, compressed_width);
             }
 
             return cast_uint64_to_pointer(Load<uint64_t>(row_source_ptr + next_pointer_offset));
@@ -274,22 +271,44 @@ namespace duckdb {
             }
         }
 
+        vector<uint64_t> col_min_values;
+
+        vector<uint8_t> GetCompressedValueWidths(RowLayout &layout) {
+            vector<uint8_t> widths;
+            for (const auto &range: layout.min_max_ranges) {
+                auto value_width = range.max - range.min;
+                auto value_offset = range.min;
+                col_min_values.push_back(value_offset);
+                auto bytes_for_width = static_cast<uint8_t>(std::ceil(std::log2(value_width + 1) / 8));
+                widths.push_back(bytes_for_width);
+            }
+
+            return widths;
+        }
+
         template<idx_t BYTES_PER_VALUE>
         void PostProcessBuildIternal(RowLayout &layout, uint8_t partition_bits) {
-            data_ptr_t prefix_sum_ptr = memory_manager.allocate(sizeof(uint32_t) * capacity);
-            auto *prefix_sum = reinterpret_cast<uint32_t *>(prefix_sum_ptr);
-            idx_t next_pointer_offset = layout.format.offsets[layout.format.types.size() - 1];
+            data_ptr_t prefix_sum_ptr = memory_manager.allocate(sizeof(uint64_t) * capacity);
+            auto *prefix_sum = reinterpret_cast<uint64_t *>(prefix_sum_ptr);
+            const idx_t next_pointer_offset = layout.format.offsets[layout.format.types.size() - 1];
 
             // we don't need the hash anymore
-            row_width = layout.format.size - sizeof(uint64_t);
-            uint64_t continuous_size = row_width * layout.row_count;
+            continuous_row_width = 0;
+            const vector<uint8_t> compressed_value_widths = GetCompressedValueWidths(layout);
+            vector<uint64_t> value_offsets_compressed;
+            for (const auto &compressed_width: compressed_value_widths) {
+                continuous_row_width += compressed_width;
+                value_offsets_compressed.push_back(continuous_row_width);
+            }
+
+            uint64_t continuous_size = continuous_row_width * layout.row_count;
             continuous_partition = make_uniq<RowLayoutPartition>(0, layout.scatter_functions, layout.gather_functions,
                                                                  layout.equality_functions,
                                                                  layout.format,
                                                                  memory_manager, continuous_size);
             data_ptr_t continuous_start = continuous_partition->data;
 
-            uint32_t current_prefix_sum = 0;
+            uint64_t current_prefix_sum = 0;
 
             float entries_per_slot = static_cast<float>(layout.row_count) / static_cast<float>(capacity);
             uint32_t max_error = 0;
@@ -318,7 +337,7 @@ namespace duckdb {
                 max_error = std::max(max_error, abs_error);
             }
 
-            std::cout << "MaxError=" << max_error << ' ';
+            // std::cout << "MaxError=" << max_error << ' ';
 
             const uint64_t ht_compressed_size = capacity * BYTES_PER_VALUE + sizeof(uint64_t);
             ht_allocation_compressed = memory_manager.allocate(ht_compressed_size);
@@ -337,11 +356,13 @@ namespace duckdb {
                 Constants::WriteValueAtOffset(ht_allocation_compressed, ht_idx, row_offset);
 
                 data_ptr_t __restrict row_source_ptr = cast_uint64_to_pointer(ht[ht_idx]);
-                data_ptr_t __restrict row_target_ptr = continuous_start + row_offset * row_width;
+                data_ptr_t __restrict row_target_ptr = continuous_start + row_offset * continuous_row_width;
 
                 do {
-                    row_source_ptr = CopyRow(row_source_ptr, row_target_ptr, row_width, next_pointer_offset);
-                    row_target_ptr += row_width;
+                    row_source_ptr = CopyCompressedRow(row_source_ptr, row_target_ptr, continuous_row_width,
+                                                       layout.format.offsets, value_offsets_compressed,
+                                                       next_pointer_offset, compressed_value_widths);
+                    row_target_ptr += continuous_row_width;
                 } while (row_source_ptr != nullptr);
             }
             memory_manager.deallocate(ht_allocation);
