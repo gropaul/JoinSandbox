@@ -18,7 +18,7 @@ const string BUILD_QUERY = "SELECT key FROM build_100m LIMIT 5_000_000;";
 const string PROBE_QUERY = "PRAGMA disabled_optimizers='top_n';WITH values AS (SELECT key FROM probe_100m LIMIT 50_000_0000) SELECT * FROM values ORDER BY hash(key*23);";
 
 
-void test_probe(HashTableBase *hash_table, Connection &con, const vector<LogicalType> &build_types, uint8_t partition_bits) {
+uint64_t TestProbe(HashTableBase *hash_table, Connection &con, const vector<LogicalType> &build_types, uint8_t partition_bits) {
     // *** GETTING THE PROBE DATA ***
 
     const auto probe_result = con.Query(PROBE_QUERY);
@@ -49,9 +49,12 @@ void test_probe(HashTableBase *hash_table, Connection &con, const vector<Logical
         " HTSize=" <<
         BytesToString(hash_table->GetHTSize(1)) << " HTPSize=" << BytesToString(
             hash_table->GetHTSize(1 << partition_bits)) << ' ';
-    time(probe_start, "Probe");
 
     std::cout << "RCount=" << count << ' ';
+
+    return time(probe_start, "Probe");
+
+
 }
 
 void test_materialization(uint8_t partition_bits, HashTableType ht_type, Connection &con) {
@@ -93,11 +96,10 @@ void test_materialization(uint8_t partition_bits, HashTableType ht_type, Connect
     hash_table->PostProcessBuild(layout, partition_bits);
     time(ht_post_process_start, "PostProcess");
 
-    time(start, "TotalBuild");
+    uint64_t build_time = time(start, "TotalBuild");
 
-    test_probe(hash_table, con, build_types, partition_bits);
-    time(start, "Total");
-    std::cout << '\n';
+    uint64_t probe_time = TestProbe(hash_table, con, build_types, partition_bits);
+    std::cout << "Total=" << build_time + probe_time << "ms\n";
 
     // layout.Print();
     layout.Free();
