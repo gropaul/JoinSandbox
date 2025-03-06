@@ -89,8 +89,8 @@ namespace duckdb {
              const idx_t count, const idx_t column_offset, SelectionVector &equal, SelectionVector &un_equal) {
 
         // Obtain pointers to the actual data in 'left' and the row pointers
-        auto __restrict left_data = FlatVector::GetData<DATA_TYPE>(left);
-        auto __restrict row_ptrs  = FlatVector::GetData<data_ptr_t>(row_pointers);
+        auto left_data = FlatVector::GetData<DATA_TYPE>(left);
+        auto row_ptrs  = FlatVector::GetData<data_ptr_t>(row_pointers);
 
         idx_t match_count = 0;
         for (idx_t i = 0; i < count; i++) {
@@ -99,9 +99,9 @@ namespace duckdb {
 
             // Address of the row data in the partition
             auto row_ptr   = row_ptrs[source_idx];
-            auto __restrict value_ptr = row_ptr + column_offset;
+            auto value_ptr = row_ptr + column_offset;
 
-            const auto __restrict lhs_ptr    = &left_data[source_idx];
+            const auto lhs_ptr    = &left_data[source_idx];
             // Compare against the element in 'left' at source_idx, but only the compressed width of the value
             if (memcmp(lhs_ptr, value_ptr, COMPRESSED_WIDTH) == 0) {
                 // Write the matching index to the result selection vector
