@@ -51,8 +51,8 @@ namespace duckdb {
     idx_t VectorRowEqual(const Vector &left, const Vector &row_pointers, const SelectionVector &sel,
                 const idx_t count, const idx_t column_offset, SelectionVector &equal, SelectionVector &un_equal) {
         // Obtain pointers to the actual data in 'left' and the row pointers
-        auto __restrict left_data = FlatVector::GetData<DATA_TYPE>(left);
-        auto __restrict row_ptrs  = FlatVector::GetData<data_ptr_t>(row_pointers);
+        auto left_data = FlatVector::GetData<DATA_TYPE>(left);
+        auto row_ptrs  = FlatVector::GetData<data_ptr_t>(row_pointers);
 
         idx_t match_count = 0;
         for (idx_t i = 0; i < count; i++) {
