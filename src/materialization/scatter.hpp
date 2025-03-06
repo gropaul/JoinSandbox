@@ -51,8 +51,8 @@ namespace duckdb {
     idx_t VectorRowEqual(const Vector &left, const Vector &row_pointers, const SelectionVector &sel,
                 const idx_t count, const idx_t column_offset, SelectionVector &equal, SelectionVector &un_equal) {
         // Obtain pointers to the actual data in 'left' and the row pointers
-        auto left_data = FlatVector::GetData<DATA_TYPE>(left);
-        auto row_ptrs  = FlatVector::GetData<data_ptr_t>(row_pointers);
+        auto __restrict left_data = FlatVector::GetData<DATA_TYPE>(left);
+        auto __restrict row_ptrs  = FlatVector::GetData<data_ptr_t>(row_pointers);
 
         idx_t match_count = 0;
         for (idx_t i = 0; i < count; i++) {
@@ -64,10 +64,10 @@ namespace duckdb {
             auto value_ptr = row_ptr + column_offset;
 
             // Load the value from that row
-            auto stored_val = Load<DATA_TYPE>(value_ptr);
-
+            const auto stored_val = Load<DATA_TYPE>(value_ptr);
+            const auto lhs_val    = left_data[source_idx];
             // Compare against the element in 'left' at source_idx
-            if (left_data[source_idx] == stored_val) {
+            if (lhs_val == stored_val) {
                 // Write the matching index to the result selection vector
                 equal.set_index(match_count, source_idx);
                 match_count++;
