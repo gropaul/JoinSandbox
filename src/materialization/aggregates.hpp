@@ -13,7 +13,7 @@ namespace duckdb {
 
     template<typename T>
     void UpdateRange(const Vector &vector, const idx_t count, Range &range) {
-        const auto __restrict data = FlatVector::GetData<T>(vector);
+        const auto data = FlatVector::GetData<T>(vector);
 
         uint64_t local_min = range.min;
         uint64_t local_max = range.max;
