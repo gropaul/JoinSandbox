@@ -13,7 +13,7 @@ uint64_t time(time_point<high_resolution_clock> start, const string &name = "") 
     return duration.count();
 }
 
-const string BUILD_QUERY = "SELECT key FROM build_100m LIMIT 5_000_000;";
+const string BUILD_QUERY = "SELECT key FROM build_100m LIMIT 50_000_000;";
 // const string BUILD_QUERY = "SELECT CAST(range as uint64) as key FROM range(64);";
 const string PROBE_QUERY = "PRAGMA disabled_optimizers='top_n';WITH values AS (SELECT key FROM probe_100m LIMIT 50_000_000) SELECT * FROM values ORDER BY hash(key*23);";
 
@@ -119,11 +119,11 @@ int main() {
     const uint64_t MAX_PARTITION_BITS = 5;
     const uint64_t PARTITION_STEP_SIZE = 1;
     for (uint64_t run = 0; run < N_RUNS; run++) {
-        std::cout << "*********** Run " << run << " ***********" << '\n';
-        for (uint8_t i = START_PARTITION_BITS; i < MAX_PARTITION_BITS; i += PARTITION_STEP_SIZE) {
-            std::cout << "PARTITIONED:            ";
-            test_materialization(i, LINEAR_PROBING_PARTITIONED, con);
-        }
+        // std::cout << "*********** Run " << run << " ***********" << '\n';
+        // for (uint8_t i = START_PARTITION_BITS; i < MAX_PARTITION_BITS; i += PARTITION_STEP_SIZE) {
+        //     std::cout << "PARTITIONED:            ";
+        //     test_materialization(i, LINEAR_PROBING_PARTITIONED, con);
+        // }
         for (uint8_t i = START_PARTITION_BITS; i < MAX_PARTITION_BITS; i += PARTITION_STEP_SIZE) {
             std::cout << "PARTITIONED_COMPRESSED: ";
             test_materialization(i, LINEAR_PROBING_PARTITIONED_COMPRESSED, con);

@@ -222,7 +222,7 @@ namespace duckdb {
 
         template<idx_t BYTES_PER_VALUE>
         idx_t GetKeysToCompareInternal(const idx_t remaining_count, const SelectionVector &remaining_sel,
-                                       const Vector &offsets_v, ProbeState &state) const {
+                                       ProbeState &state) const {
             const auto offsets = FlatVector::GetData<uint64_t>(state.offsets_v);
             const auto rhs_ptrs = FlatVector::GetData<data_ptr_t>(state.rhs_row_pointers_v);
 
@@ -254,22 +254,22 @@ namespace duckdb {
         }
 
         idx_t GetKeysToCompare(const idx_t remaining_count, const SelectionVector &remaining_sel,
-                               const Vector &offsets_v, ProbeState &state) const override {
+                               ProbeState &state) override {
             switch (bytes_per_value) {
                 case 1:
-                    return GetKeysToCompareInternal<1>(remaining_count, remaining_sel, offsets_v, state);
+                    return GetKeysToCompareInternal<1>(remaining_count, remaining_sel, state);
                 case 2:
-                    return GetKeysToCompareInternal<2>(remaining_count, remaining_sel, offsets_v, state);
+                    return GetKeysToCompareInternal<2>(remaining_count, remaining_sel, state);
                 case 3:
-                    return GetKeysToCompareInternal<3>(remaining_count, remaining_sel, offsets_v, state);
+                    return GetKeysToCompareInternal<3>(remaining_count, remaining_sel, state);
                 case 4:
-                    return GetKeysToCompareInternal<4>(remaining_count, remaining_sel, offsets_v, state);
+                    return GetKeysToCompareInternal<4>(remaining_count, remaining_sel, state);
                 case 5:
-                    return GetKeysToCompareInternal<5>(remaining_count, remaining_sel, offsets_v, state);
+                    return GetKeysToCompareInternal<5>(remaining_count, remaining_sel, state);
                 case 6:
-                    return GetKeysToCompareInternal<6>(remaining_count, remaining_sel, offsets_v, state);
+                    return GetKeysToCompareInternal<6>(remaining_count, remaining_sel, state);
                 case 7:
-                    return GetKeysToCompareInternal<7>(remaining_count, remaining_sel, offsets_v, state);
+                    return GetKeysToCompareInternal<7>(remaining_count, remaining_sel, state);
                 default:
                     throw std::runtime_error("Unsupported bytes per value: " + std::to_string(bytes_per_value));
             }
@@ -357,7 +357,7 @@ namespace duckdb {
                 block_prefix_sum += mask[BLOCK_SIZE - 1];
             }
 
-            std::cout << "MaxError=" << max_error << " MinError=" << min_error << ' ';
+            // std::cout << "MaxError=" << max_error << " MinError=" << min_error << ' ';
             return prefix_sum_ptr;
         }
 
@@ -382,7 +382,7 @@ namespace duckdb {
                 // todo: this must go before the !is_occupied check to encode the chain length
                 Constants::WriteValueAtOffset(ht_allocation_compressed, ht_offset, row_offset);
 
-                data_ptr_t __restrict row_source_ptr = cast_uint64_to_pointer(ht[ht_offset]);
+                data_ptr_t __restrict row_source_ptr = cast_uint64_to_pointer(ht[ht_offset] & SLOT_MASK);
                 data_ptr_t __restrict row_target_ptr = continuous_start + row_offset * continuous_row_width;
 
                 uint64_t read_offset = Constants::ReadValueAtOffset(ht_allocation_compressed, ht_offset);

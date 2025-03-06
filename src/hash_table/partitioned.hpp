@@ -18,6 +18,7 @@ typedef uint64_t ht_slot_t;
 namespace duckdb {
     struct ProbeState {
         Vector offsets_v;
+        Vector salts_v;
         Vector found_row_pointers_v;
 
         // used for bulk key comparison
@@ -32,7 +33,7 @@ namespace duckdb {
         SelectionVector key_equal_sel;
         SelectionVector key_comp_sel;
 
-        explicit ProbeState(): offsets_v(LogicalType::HASH), found_row_pointers_v(LogicalType::POINTER),
+        explicit ProbeState(): offsets_v(LogicalType::HASH), salts_v(LogicalType::HASH), found_row_pointers_v(LogicalType::POINTER),
                                rhs_row_pointers_v(LogicalType::POINTER), found_count(0),
                                found_sel(STANDARD_VECTOR_SIZE), remaining_sel(STANDARD_VECTOR_SIZE),
                                key_equal_sel(STANDARD_VECTOR_SIZE),
@@ -49,6 +50,10 @@ namespace duckdb {
         uint64_t capacity;
         uint64_t capacity_mask;
         uint64_t capacity_bit_shift;
+        static constexpr u_int64_t SALT_SHIFT = 64 - 16;
+        // can be used to retrieve the salt from the ht slot, were the salt is at the top 16 bits
+        static constexpr u_int64_t SALT_MASK = 0xFFFF000000000000;
+        static constexpr u_int64_t SLOT_MASK = ~SALT_MASK;
 
         uint64_t elements_build = 0;
         uint64_t collisions_build = 0;
@@ -125,38 +130,50 @@ namespace duckdb {
 
             elements_build += count;
 
+
+
             for (uint64_t i = 0; i < count; i++) {
                 auto lhs_row_pointer = row_pointer_data[i];
                 const auto hash = hashes_data[i];
                 auto ht_offset = hash >> capacity_bit_shift;
+                auto salt = hash << SALT_SHIFT;
                 while (true) {
                     if (ht[ht_offset] == 0) {
-                        ht[ht_offset] = cast_pointer_to_uint64(lhs_row_pointer);
+                        ht[ht_offset] = cast_pointer_to_uint64(lhs_row_pointer) | salt;
                         // store zero to mark the end of the chain
                         data_ptr_t next_pointer_location = lhs_row_pointer + hash_col_offset;
                         Store<uint64_t>(0, next_pointer_location);
                         break;
                     } else {
-                        bool equal = true;
-                        for (auto key_col_idx: key_columns) {
-                            const auto offset = key_offsets[key_col_idx];
-                            const auto left = cast_uint64_to_pointer(ht[ht_offset]);
-                            const auto right = lhs_row_pointer;
-                            if (!key_equal[key_col_idx](left, right, offset)) {
-                                equal = false;
-                                break;
+                        // check if the salt is the same
+                        uint64_t slot_salt = ht[ht_offset] & SALT_MASK;
+                        if (slot_salt == salt) {
+                            // check if the keys are the same
+                            bool keyes_equal = true;
+                            for (auto key_col_idx: key_columns) {
+                                const auto offset = key_offsets[key_col_idx];
+                                const auto left = cast_uint64_to_pointer(ht[ht_offset] & SLOT_MASK) ;
+                                const auto right = lhs_row_pointer;
+                                if (!key_equal[key_col_idx](left, right, offset)) {
+                                    keyes_equal = false;
+                                    break;
+                                }
                             }
-                        }
-                        if (equal) {
-                            // chain the row: for this row to insert, set the current row pointer to the next row pointer
-                            data_ptr_t next_element_pointer = cast_uint64_to_pointer(ht[ht_offset]);
-                            data_ptr_t next_pointer_location = lhs_row_pointer + hash_col_offset;
-                            // write the next pointer
-                            Store<uint64_t>(cast_pointer_to_uint64(next_element_pointer), next_pointer_location);
-                            // put the current pointer in the hash table
-                            ht[ht_offset] = cast_pointer_to_uint64(lhs_row_pointer);
-                            break;
+                            if (keyes_equal) {
+                                // chain the row: for this row to insert, set the current row pointer to the next row pointer
+                                data_ptr_t next_element_pointer = cast_uint64_to_pointer(ht[ht_offset]);
+                                data_ptr_t next_pointer_location = lhs_row_pointer + hash_col_offset;
+                                // write the next pointer
+                                Store<uint64_t>(cast_pointer_to_uint64(next_element_pointer), next_pointer_location);
+                                // put the current pointer in the hash table
+                                ht[ht_offset] = cast_pointer_to_uint64(lhs_row_pointer) | salt;
+                                break;
+                            } else {
+                                collisions_build++;
+                                ht_offset = (ht_offset + 1) & capacity_mask;
+                            }
                         } else {
+                            // we have a collision
                             collisions_build++;
                             ht_offset = (ht_offset + 1) & capacity_mask;
                         }
@@ -166,8 +183,8 @@ namespace duckdb {
             // std::cout << "Partition=" << partition_idx << " Min=" << min_idx << " Max=" << max_idx << '\n';
         }
 
-        static void GetInitialHTOffset(DataChunk &left, Vector &hashes_v, const vector<column_t> &key_columns,
-                                       const size_t capacity_bit_shift) {
+        void GetInitialHTOffsetAndSalt(DataChunk &left, Vector &hashes_v,Vector &salts_v, const vector<column_t> &key_columns,
+                                       const size_t capacity_bit_shift) const {
             idx_t count = left.size();
             auto &key = left.data[key_columns[0]];
             VectorOperations::Hash(key, hashes_v, count);
@@ -177,15 +194,18 @@ namespace duckdb {
                 VectorOperations::CombineHash(hashes_v, combined_key, count);
             }
             auto hashes = FlatVector::GetData<uint64_t>(hashes_v);
+            auto salts = FlatVector::GetData<uint64_t>(salts_v);
             for (idx_t i = 0; i < count; i++) {
                 hashes[i] = hashes[i] >> capacity_bit_shift;
+                salts[i] = hashes[i] << SALT_SHIFT;
             }
         }
 
         //! Probes the HT and if the key hits and full slot, add it to the list of keys to compare
         virtual idx_t GetKeysToCompare(const idx_t remaining_count, const SelectionVector &remaining_sel,
-                                      const Vector &offsets_v, ProbeState &state) const {
+                                      ProbeState &state) {
             const auto offsets = FlatVector::GetData<uint64_t>(state.offsets_v);
+            const auto salts = FlatVector::GetData<uint64_t>(state.salts_v);
             const auto rhs_ptrs = FlatVector::GetData<data_ptr_t>(state.rhs_row_pointers_v);
 
             auto &key_comp_sel = state.key_comp_sel;
@@ -195,17 +215,24 @@ namespace duckdb {
             for (idx_t idx = 0; idx < remaining_count; idx++) {
                 auto remaining_idx = state.remaining_sel.get_index(idx);
                 auto ht_offset = offsets[remaining_idx];
+                auto salt = salts[remaining_idx];
                 while (true) {
                     auto ht_slot = ht[ht_offset];
                     if (ht_slot == 0) {
                         break;
                     }
 
-                    // we need to compare the keys
-                    rhs_ptrs[remaining_idx] = cast_uint64_to_pointer(ht_slot);
-                    key_comp_sel.set_index(key_comp_count, remaining_idx);
-                    key_comp_count++;
-                    break;
+                    const uint64_t slot_salt = ht_slot & SALT_MASK;
+                    if (slot_salt == salt) {
+                        // we need to compare the keys
+                        rhs_ptrs[remaining_idx] = cast_uint64_to_pointer(ht_slot & SLOT_MASK);
+                        key_comp_sel.set_index(key_comp_count, remaining_idx);
+                        key_comp_count++;
+                        break;
+                    }
+
+                    ht_offset = (ht_offset + 1) & capacity_mask;
+                    collisions_probe ++;
                 }
             }
 
@@ -222,7 +249,7 @@ namespace duckdb {
         }
 
         idx_t GetRowPointers(DataChunk &left, ProbeState &state) {
-            GetInitialHTOffset(left, state.offsets_v, key_columns, capacity_bit_shift);
+            GetInitialHTOffsetAndSalt(left, state.offsets_v, state.salts_v, key_columns, capacity_bit_shift);
 
             const auto keys_v = left.data[key_columns[0]];
             D_ASSERT(keys_v.GetType() == LogicalType::UBIGINT);
@@ -243,7 +270,7 @@ namespace duckdb {
 
             while (remaining_count != 0) {
 
-                const idx_t key_comp_count = GetKeysToCompare(remaining_count, state.remaining_sel, state.offsets_v, state);
+                const idx_t key_comp_count = GetKeysToCompare(remaining_count, state.remaining_sel, state);
 
                 // compare the keys in the key_comp_sel with the keys in the hash table
                 const auto equality_count = CompareKeys(keys_v, state, key_comp_count);
