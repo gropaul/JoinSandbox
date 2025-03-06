@@ -4,6 +4,7 @@
 add_library_unity(
         aggregates.hpp
         row_layout.hpp
+        aggregates.hpp
         memory_manager.hpp
         memory_manager.cpp
         scatter.hpp
