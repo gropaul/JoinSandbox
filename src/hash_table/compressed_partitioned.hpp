@@ -149,9 +149,12 @@ namespace duckdb {
     public:
         unique_ptr<RowLayoutPartition> continuous_partition;
         uint64_t bytes_per_value;
-        uint64_t continuous_row_width;
 
         data_ptr_t ht_allocation_compressed;
+
+        vector<compressed_vector_equality_function_t> compressed_vector_eq_functions;
+        vector<uint8_t> compressed_value_widths;
+        uint64_t continuous_row_width;
 
         CompressedPartitioned(uint64_t number_of_records, MemoryManager &memory_manager,
                               const vector<column_t> &keys) : PartitionedHashTable(
@@ -190,8 +193,10 @@ namespace duckdb {
             }
         }
 
+
+
         static data_ptr_t CopyCompressedRow(uint8_t * __restrict row_source_ptr, uint8_t * __restrict row_target_ptr,
-                                            const uint64_t row_width, const vector<uint64_t> &value_offsets,
+                                            const vector<uint64_t> &value_offsets,
                                             const vector<uint64_t> &value_offsets_compressed,
                                             const uint64_t next_pointer_offset,
                                             const vector<uint8_t> &compressed_value_widths) {
@@ -227,7 +232,6 @@ namespace duckdb {
             using Constants = CompressedConstants<BYTES_PER_VALUE>;
             data_ptr_t start_ptr = ht_allocation_compressed;
             data_ptr_t continuous_start = continuous_partition->data;
-            uint64_t row_width = continuous_partition->format.size - sizeof(uint64_t);
 
             // find empty or filled slots, add filled slots to the key_comp_sel
             for (idx_t idx = 0; idx < remaining_count; idx++) {
@@ -239,7 +243,7 @@ namespace duckdb {
                         break;
                     }
                     // we need to compare the keys
-                    rhs_ptrs[remaining_idx] = continuous_start + ht_slot * row_width;
+                    rhs_ptrs[remaining_idx] = continuous_start + ht_slot * continuous_row_width;
                     key_comp_sel.set_index(key_comp_count, remaining_idx);
                     key_comp_count++;
                     break;
@@ -270,6 +274,16 @@ namespace duckdb {
                     throw std::runtime_error("Unsupported bytes per value: " + std::to_string(bytes_per_value));
             }
         }
+
+        idx_t CompareKeys(const Vector &keys_v, ProbeState &state, const idx_t key_comp_count) const override {
+            auto &key_comp_sel = state.key_comp_sel;
+            const auto offset = key_row_offsets[0];
+            idx_t equality_count = compressed_vector_eq_functions[0](keys_v, state.rhs_row_pointers_v, key_comp_sel,
+                                                    key_comp_count, offset, state.key_equal_sel,
+                                                    state.remaining_sel);
+            return equality_count;
+        }
+
 
         vector<uint64_t> col_min_values;
 
@@ -349,9 +363,13 @@ namespace duckdb {
 
 
         template<idx_t BYTES_PER_VALUE>
-         __attribute__((noinline)) void FillContinuousLayout(const uint32_t *prefix_sum, data_ptr_t continuous_start,
-                                    const idx_t capacity, const idx_t next_pointer_offset) {
-
+        __attribute__((noinline)) void FillContinuousLayout(const uint32_t *prefix_sum, data_ptr_t continuous_start,
+                                                            const idx_t capacity, const idx_t next_pointer_offset,
+                                                            uint64_t continuous_row_width,
+                                                            const vector<uint8_t> &compressed_value_widths,
+                                                            const vector<uint64_t> &value_offsets,
+                                                            const vector<uint64_t> &value_offsets_compressed
+        ) {
             using Constants = CompressedConstants<BYTES_PER_VALUE>;
 
             for (size_t ht_offset = 0; ht_offset < capacity; ht_offset++) {
@@ -365,13 +383,15 @@ namespace duckdb {
                 Constants::WriteValueAtOffset(ht_allocation_compressed, ht_offset, row_offset);
 
                 data_ptr_t __restrict row_source_ptr = cast_uint64_to_pointer(ht[ht_offset]);
-                data_ptr_t __restrict row_target_ptr = continuous_start + row_offset * row_width;
+                data_ptr_t __restrict row_target_ptr = continuous_start + row_offset * continuous_row_width;
 
-                // uint64_t read_offset = Constants::ReadValueAtOffset(ht_allocation_compressed, ht_offset);
-                // D_ASSERT(read_offset == row_offset);
+                uint64_t read_offset = Constants::ReadValueAtOffset(ht_allocation_compressed, ht_offset);
+                D_ASSERT(read_offset == row_offset);
 
                 do {
-                    data_ptr_t next_ptr = CopyRow(row_source_ptr, row_target_ptr, row_width, next_pointer_offset);
+                    data_ptr_t next_ptr = CopyCompressedRow(row_source_ptr, row_target_ptr, value_offsets,
+                                                            value_offsets_compressed, next_pointer_offset,
+                                                            compressed_value_widths);
 
                     // check if the first uint64_t at row_source_ptr is the same as the row_target_ptr
                     // const auto new_value = Load<uint64_t>(row_target_ptr);
@@ -379,7 +399,7 @@ namespace duckdb {
                     // D_ASSERT(new_value == og_value);
 
                     row_source_ptr = next_ptr;
-                    row_target_ptr += row_width;
+                    row_target_ptr += continuous_row_width;
                 } while (row_source_ptr != nullptr);
             }
         }
@@ -392,11 +412,17 @@ namespace duckdb {
 
             // we don't need the hash anymore
             continuous_row_width = 0;
-            const vector<uint8_t> compressed_value_widths = GetCompressedValueWidths(layout);
+            compressed_value_widths = GetCompressedValueWidths(layout);
             vector<uint64_t> value_offsets_compressed;
             for (const auto &compressed_width: compressed_value_widths) {
-                continuous_row_width += compressed_width;
                 value_offsets_compressed.push_back(continuous_row_width);
+                continuous_row_width += compressed_width;
+            }
+
+            for (const auto key_col_idx: key_columns) {
+                LogicalType type = layout.format.types[key_col_idx];
+                uint8_t compressed_width = compressed_value_widths[key_col_idx];
+                compressed_vector_eq_functions.push_back(GetCompressedEqualityFunction(type, compressed_width));
             }
 
             uint64_t continuous_size = continuous_row_width * layout.row_count;
@@ -410,7 +436,9 @@ namespace duckdb {
             ht_allocation_compressed = memory_manager.allocate(ht_compressed_size);
             memset(ht_allocation_compressed, 0, ht_compressed_size);
 
-            FillContinuousLayout<BYTES_PER_VALUE>(prefix_sum, continuous_start, capacity, next_pointer_offset);
+            FillContinuousLayout<BYTES_PER_VALUE>(prefix_sum, continuous_start, capacity, next_pointer_offset,
+                                                  continuous_row_width, compressed_value_widths, layout.format.offsets,
+                                                  value_offsets_compressed);
 
             memory_manager.deallocate(ht_allocation);
             memory_manager.deallocate(prefix_sum_ptr);

@@ -80,6 +80,43 @@ namespace duckdb {
         return match_count;
     }
 
+    typedef idx_t (*compressed_vector_equality_function_t)(const Vector &left, const Vector &row_pointers, const SelectionVector &sel,
+                                   const idx_t count, const idx_t column_offset,
+                                   SelectionVector &equal, SelectionVector &un_equal);
+
+    template <typename DATA_TYPE, int COMPRESSED_WIDTH>
+    idx_t CompressedVectorRowEqual(const Vector &left, const Vector &row_pointers, const SelectionVector &sel,
+             const idx_t count, const idx_t column_offset, SelectionVector &equal, SelectionVector &un_equal) {
+
+        // Obtain pointers to the actual data in 'left' and the row pointers
+        auto __restrict left_data = FlatVector::GetData<DATA_TYPE>(left);
+        auto __restrict row_ptrs  = FlatVector::GetData<data_ptr_t>(row_pointers);
+
+        idx_t match_count = 0;
+        for (idx_t i = 0; i < count; i++) {
+            // Index in the original data
+            auto source_idx = sel.get_index(i);
+
+            // Address of the row data in the partition
+            auto row_ptr   = row_ptrs[source_idx];
+            auto __restrict value_ptr = row_ptr + column_offset;
+
+            const auto __restrict lhs_ptr    = &left_data[source_idx];
+            // Compare against the element in 'left' at source_idx, but only the compressed width of the value
+            if (memcmp(lhs_ptr, value_ptr, COMPRESSED_WIDTH) == 0) {
+                // Write the matching index to the result selection vector
+                equal.set_index(match_count, source_idx);
+                match_count++;
+            } else {
+                // Write the non-matching index to the result selection vector
+                un_equal.set_index(i - match_count, source_idx);
+            }
+        }
+        // Return how many matches were found
+        return match_count;
+    }
+
+
     typedef bool (*row_equality_function_t)(data_ptr_t left, data_ptr_t right, const idx_t column_offset);
 
     template <typename DATA_TYPE>
@@ -142,6 +179,59 @@ namespace duckdb {
                 throw NotImplementedException("Gather function not implemented for type");
         }
     }
+
+    template <int COMPRESSED_WIDTH>
+    static compressed_vector_equality_function_t GetCompressedEqualityFunctionA(const LogicalType &type) {
+        switch (type.id()) {
+            case LogicalTypeId::BIGINT:
+                return CompressedVectorRowEqual<int64_t, COMPRESSED_WIDTH>;
+            case LogicalTypeId::UBIGINT:
+                return CompressedVectorRowEqual<uint64_t, COMPRESSED_WIDTH>;
+            case LogicalTypeId::INTEGER:
+                return CompressedVectorRowEqual<int32_t, COMPRESSED_WIDTH>;
+            case LogicalTypeId::UINTEGER:
+                return CompressedVectorRowEqual<uint32_t, COMPRESSED_WIDTH>;
+            case LogicalTypeId::SMALLINT:
+                return CompressedVectorRowEqual<int16_t, COMPRESSED_WIDTH>;
+            case LogicalTypeId::USMALLINT:
+                return CompressedVectorRowEqual<uint16_t, COMPRESSED_WIDTH>;
+            case LogicalTypeId::TINYINT:
+                return CompressedVectorRowEqual<int8_t, COMPRESSED_WIDTH>;
+            case LogicalTypeId::UTINYINT:
+                return CompressedVectorRowEqual<uint8_t, COMPRESSED_WIDTH>;
+            case LogicalTypeId::FLOAT:
+                return CompressedVectorRowEqual<float, COMPRESSED_WIDTH>;
+            case LogicalTypeId::DOUBLE:
+                return CompressedVectorRowEqual<double, COMPRESSED_WIDTH>;
+            default:
+                throw NotImplementedException("Equality function not implemented for type");
+        }
+    }
+
+    static compressed_vector_equality_function_t GetCompressedEqualityFunction(const LogicalType &type, const int compressed_width) {
+        switch (compressed_width){
+            case 1:
+                return GetCompressedEqualityFunctionA<1>(type);
+            case 2:
+                return GetCompressedEqualityFunctionA<2>(type);
+            case 3:
+                return GetCompressedEqualityFunctionA<3>(type);
+            case 4:
+                return GetCompressedEqualityFunctionA<4>(type);
+            case 5:
+                return GetCompressedEqualityFunctionA<5>(type);
+            case 6:
+                return GetCompressedEqualityFunctionA<6>(type);
+            case 7:
+                return GetCompressedEqualityFunctionA<7>(type);
+            case 8:
+                return GetCompressedEqualityFunctionA<8>(type);
+            default:
+                throw NotImplementedException("Equality function not implemented for type");
+        }
+    }
+
+
 
     static vector_equality_function_t GetEqualityFunction(const LogicalType &type) {
         switch (type.id()) {

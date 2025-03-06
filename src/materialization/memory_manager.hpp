@@ -1,31 +1,31 @@
-#pragma once
-#include <cstddef>
-#include <unordered_map>
+//
+// Created by Paul on 08/02/2025.
+//
 
-// Adjust the definition of data_ptr_t as you currently use it.
-// For example:
-typedef unsigned char *data_ptr_t;
+#ifndef MEMORY_MANAGER_H
+#define MEMORY_MANAGER_H
+#include <unordered_map>
+#include "duckdb.hpp"
 
 namespace duckdb {
-
     class MemoryManager {
     public:
-        MemoryManager() = default;
-        ~MemoryManager();
 
-        data_ptr_t allocate(std::size_t size);
+        // Allocate a block of memory and return a pointer to the block.
+        data_ptr_t allocate(size_t size);
+
+        // Deallocate a previously allocated block of memory.
         void deallocate(data_ptr_t ptr);
 
-        std::size_t getActiveAllocations() const;
+        // Get the current number of active allocations.
+        size_t getActiveAllocations() const;
+
+        // Destructor to clean up any remaining allocations.
+        ~MemoryManager();
 
     private:
-        // To store metadata about each allocation
-        struct AllocationInfo {
-            std::size_t size;
-            bool used_hugepages;
-        };
-
-        std::unordered_map<void*, AllocationInfo> allocations;
+        // Map to store active allocations with their sizes.
+        std::unordered_map<void*, size_t> allocations;
     };
-
 }
+#endif  // MEMORY_MANAGER_H

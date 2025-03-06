@@ -15,8 +15,10 @@ uint64_t time(time_point<high_resolution_clock> start, const string &name = "") 
 
 const string BUILD_QUERY = "SELECT key FROM build_100m LIMIT 5_000_000;";
 // const string BUILD_QUERY = "SELECT CAST(range as uint64) as key FROM range(64);";
-const string PROBE_QUERY = "PRAGMA disabled_optimizers='top_n';WITH values AS (SELECT key FROM probe_100m LIMIT 50_000_0000) SELECT * FROM values ORDER BY hash(key*23);";
+const string PROBE_QUERY = "PRAGMA disabled_optimizers='top_n';WITH values AS (SELECT key FROM probe_100m LIMIT 50_000_000) SELECT * FROM values ORDER BY hash(key*23);";
 
+// const string BUILD_QUERY = "SELECT CAST(range as uint64) as key FROM range(3000)";
+// const string PROBE_QUERY = "SELECT CAST(range as uint64) as key FROM range(3000)";
 
 uint64_t TestProbe(HashTableBase *hash_table, Connection &con, const vector<LogicalType> &build_types, uint8_t partition_bits) {
     // *** GETTING THE PROBE DATA ***
@@ -76,7 +78,7 @@ void test_materialization(uint8_t partition_bits, HashTableType ht_type, Connect
 
     const auto start = std::chrono::high_resolution_clock::now();
     MemoryManager mm;
-    RowLayout layout(materialization_types, keys, partition_bits, mm);
+    RowLayout layout(materialization_types, keys, partition_bits, true, mm);
 
     while (next_chunk) {
         layout.Append(*next_chunk);

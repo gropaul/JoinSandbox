@@ -212,6 +212,15 @@ namespace duckdb {
             return key_comp_count;
         }
 
+        virtual idx_t CompareKeys(const Vector &keys_v, ProbeState &state, const idx_t key_comp_count) const {
+            auto &key_comp_sel = state.key_comp_sel;
+            const auto offset = key_row_offsets[0];
+            idx_t equality_count = vector_eq_functions[0](keys_v, state.rhs_row_pointers_v, key_comp_sel,
+                                                    key_comp_count, offset, state.key_equal_sel,
+                                                    state.remaining_sel);
+            return equality_count;
+        }
+
         idx_t GetRowPointers(DataChunk &left, ProbeState &state) {
             GetInitialHTOffset(left, state.offsets_v, key_columns, capacity_bit_shift);
 
@@ -234,14 +243,10 @@ namespace duckdb {
 
             while (remaining_count != 0) {
 
-                idx_t key_comp_count = 0;
-                key_comp_count = GetKeysToCompare(remaining_count, state.remaining_sel, state.offsets_v, state);
+                const idx_t key_comp_count = GetKeysToCompare(remaining_count, state.remaining_sel, state.offsets_v, state);
 
                 // compare the keys in the key_comp_sel with the keys in the hash table
-                const auto offset = key_row_offsets[0];
-                idx_t equality_count = vector_eq_functions[0](keys_v, state.rhs_row_pointers_v, key_comp_sel,
-                                                              key_comp_count, offset, state.key_equal_sel,
-                                                              state.remaining_sel);
+                const auto equality_count = CompareKeys(keys_v, state, key_comp_count);
 
                 // add the equal keys to the found pointers
                 for (idx_t i = 0; i < equality_count; i++) {
