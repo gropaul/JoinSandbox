@@ -194,8 +194,7 @@ namespace duckdb {
         }
 
 
-
-        static data_ptr_t CopyCompressedRow(uint8_t * __restrict row_source_ptr, uint8_t * __restrict row_target_ptr,
+        static data_ptr_t CopyCompressedRow(uint8_t *row_source_ptr, uint8_t * row_target_ptr,
                                             const vector<uint64_t> &value_offsets,
                                             const vector<uint64_t> &value_offsets_compressed,
                                             const uint64_t next_pointer_offset,
@@ -206,8 +205,8 @@ namespace duckdb {
                 const auto value_offset_compressed = value_offsets_compressed[col_idx];
                 const auto compressed_width = compressed_value_widths[col_idx];
 
-                const auto value_source_ptr = row_source_ptr + value_offset;
-                const auto value_target_ptr = row_target_ptr + value_offset_compressed;
+                const auto __restrict value_source_ptr = row_source_ptr + value_offset;
+                const auto __restrict value_target_ptr = row_target_ptr + value_offset_compressed;
 
                 // write the compressed value to the target
                 std::memcpy(value_target_ptr, value_source_ptr, compressed_width);
@@ -279,8 +278,8 @@ namespace duckdb {
             auto &key_comp_sel = state.key_comp_sel;
             const auto offset = key_row_offsets[0];
             idx_t equality_count = compressed_vector_eq_functions[0](keys_v, state.rhs_row_pointers_v, key_comp_sel,
-                                                    key_comp_count, offset, state.key_equal_sel,
-                                                    state.remaining_sel);
+                                                                     key_comp_count, offset, state.key_equal_sel,
+                                                                     state.remaining_sel);
             return equality_count;
         }
 
@@ -363,6 +362,36 @@ namespace duckdb {
 
 
         template<idx_t BYTES_PER_VALUE>
+        __attribute__((noinline))  void Copy(const size_t main_block_idx, const size_t occupied_block_idx, size_t occupied_inner_idx,
+                  const uint16_t *mask, const uint32_t *prefix_sum, data_ptr_t continuous_start,
+                  const vector<uint64_t> &value_offsets, const vector<uint64_t> &value_offsets_compressed,
+                  const idx_t next_pointer_offset) {
+            using Constants = CompressedConstants<BYTES_PER_VALUE>;
+
+            const size_t idx = occupied_block_idx + occupied_inner_idx;
+            const size_t ht_offset = main_block_idx + mask[idx];
+            const uint32_t row_offset = prefix_sum[ht_offset];
+            Constants::WriteValueAtOffset(ht_allocation_compressed, ht_offset, row_offset);
+
+            data_ptr_t __restrict row_source_ptr = cast_uint64_to_pointer(ht[ht_offset] & SLOT_MASK);
+            data_ptr_t __restrict row_target_ptr = continuous_start + row_offset * continuous_row_width;
+
+            uint64_t read_offset = Constants::ReadValueAtOffset(ht_allocation_compressed, ht_offset);
+            D_ASSERT(read_offset == row_offset);
+            CopyCompressedRow(row_source_ptr, row_target_ptr, value_offsets,
+                        value_offsets_compressed, next_pointer_offset,
+                        compressed_value_widths);
+            // do {
+            //     data_ptr_t next_ptr = CopyCompressedRow(row_source_ptr, row_target_ptr, value_offsets,
+            //                                             value_offsets_compressed, next_pointer_offset,
+            //                                             compressed_value_widths);
+            //
+            //     row_source_ptr = next_ptr;
+            //     row_target_ptr += continuous_row_width;
+            // } while (row_source_ptr != nullptr);
+        }
+
+        template<idx_t BYTES_PER_VALUE>
         __attribute__((noinline)) void FillContinuousLayout(const uint32_t *prefix_sum, data_ptr_t continuous_start,
                                                             const idx_t capacity, const idx_t next_pointer_offset,
                                                             uint64_t continuous_row_width,
@@ -370,37 +399,40 @@ namespace duckdb {
                                                             const vector<uint64_t> &value_offsets,
                                                             const vector<uint64_t> &value_offsets_compressed
         ) {
-            using Constants = CompressedConstants<BYTES_PER_VALUE>;
+            constexpr uint64_t MAIN_BLOCK_SIZE = 4096;
+            constexpr int64_t OCCUPIED_BLOCK_SIZE = 512;
 
-            for (size_t ht_offset = 0; ht_offset < capacity; ht_offset++) {
-                const bool is_occupied = ht[ht_offset] != 0;
-                const uint32_t row_offset = prefix_sum[ht_offset];
+            uint16_t mask[MAIN_BLOCK_SIZE];
 
-                if (!is_occupied) {
-                    continue;
+            for (size_t main_block_idx = 0; main_block_idx < capacity; main_block_idx += MAIN_BLOCK_SIZE) {
+                for (size_t main_inner_idx = 0; main_inner_idx < MAIN_BLOCK_SIZE; main_inner_idx++) {
+                    const size_t ht_offset = main_block_idx + main_inner_idx;
+                    const bool is_occupied = ht[ht_offset] != 0;
+                    mask[main_inner_idx] = is_occupied;
                 }
-                // todo: this must go before the !is_occupied check to encode the chain length
-                Constants::WriteValueAtOffset(ht_allocation_compressed, ht_offset, row_offset);
+                int64_t n_occupied = 0;
+                for (size_t inner_idx = 0; inner_idx < MAIN_BLOCK_SIZE; inner_idx++) {
+                    const uint16_t is_occ = mask[inner_idx];
+                    mask[n_occupied] = inner_idx;
+                    n_occupied += is_occ;
+                }
+                int64_t occupied_block_idx = 0;
+                //  n_occupied - OCCUPIED_BLOCK_SIZE can be negative
+                for (; occupied_block_idx < n_occupied - OCCUPIED_BLOCK_SIZE;
+                     occupied_block_idx += OCCUPIED_BLOCK_SIZE) {
+                    for (size_t occupied_inner_idx = 0; occupied_inner_idx < OCCUPIED_BLOCK_SIZE; occupied_inner_idx++) {
+                        Copy<BYTES_PER_VALUE>(main_block_idx, occupied_block_idx, occupied_inner_idx, mask, prefix_sum,
+                                              continuous_start, value_offsets, value_offsets_compressed,
+                                              next_pointer_offset);
+                    }
+                }
 
-                data_ptr_t __restrict row_source_ptr = cast_uint64_to_pointer(ht[ht_offset] & SLOT_MASK);
-                data_ptr_t __restrict row_target_ptr = continuous_start + row_offset * continuous_row_width;
-
-                uint64_t read_offset = Constants::ReadValueAtOffset(ht_allocation_compressed, ht_offset);
-                D_ASSERT(read_offset == row_offset);
-
-                do {
-                    data_ptr_t next_ptr = CopyCompressedRow(row_source_ptr, row_target_ptr, value_offsets,
-                                                            value_offsets_compressed, next_pointer_offset,
-                                                            compressed_value_widths);
-
-                    // check if the first uint64_t at row_source_ptr is the same as the row_target_ptr
-                    // const auto new_value = Load<uint64_t>(row_target_ptr);
-                    // const auto og_value = Load<uint64_t>(row_source_ptr);
-                    // D_ASSERT(new_value == og_value);
-
-                    row_source_ptr = next_ptr;
-                    row_target_ptr += continuous_row_width;
-                } while (row_source_ptr != nullptr);
+                size_t remaining = n_occupied - occupied_block_idx;
+                for (size_t occupied_inner_idx = 0; occupied_inner_idx < remaining; occupied_inner_idx++) {
+                    Copy<BYTES_PER_VALUE>(main_block_idx, occupied_block_idx, occupied_inner_idx, mask, prefix_sum,
+                      continuous_start, value_offsets, value_offsets_compressed,
+                      next_pointer_offset);
+                }
             }
         }
 

@@ -196,8 +196,9 @@ namespace duckdb {
             auto hashes = FlatVector::GetData<uint64_t>(hashes_v);
             auto salts = FlatVector::GetData<uint64_t>(salts_v);
             for (idx_t i = 0; i < count; i++) {
-                hashes[i] = hashes[i] >> capacity_bit_shift;
                 salts[i] = hashes[i] << SALT_SHIFT;
+                hashes[i] = hashes[i] >> capacity_bit_shift;
+
             }
         }
 
