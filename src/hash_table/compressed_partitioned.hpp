@@ -160,7 +160,6 @@ namespace duckdb {
         uint64_t continuous_row_width;
 
         static constexpr uint8_t GROUP_SIZE = 16;
-        static constexpr uint32_t BLOCK_SIZE = 16;
 
         CompressedPartitioned(uint64_t number_of_records, MemoryManager &memory_manager,
                               const vector<column_t> &keys) : PartitionedHashTable(
@@ -400,8 +399,8 @@ namespace duckdb {
                 // todo: target aligned 64bit writes because 8 bit write will trigger 64 bit read + mask + or + write
                 // todo: Do this vectorized: first fill vector of these sizes, then write them to the target ->
                 // todo: overhead of masking and shifting reduced, loop at frame of reference encoding
-                const auto __restrict value_source_ptr = task.from + value_offset;
-                const auto __restrict value_target_ptr = task.to + value_offset_compressed;
+                const auto value_source_ptr = task.from + value_offset;
+                const auto value_target_ptr = task.to + value_offset_compressed;
 
                 // write the compressed value to the target
                 std::memcpy(value_target_ptr, value_source_ptr, compressed_width);
