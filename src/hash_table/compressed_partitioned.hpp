@@ -13,6 +13,7 @@
 
 #include "base.hpp"
 #include "materialization/row_layout.hpp"
+#include "utils.hpp"
 
 
 // typedef uint32_t key_t;
@@ -22,16 +23,16 @@ typedef uint64_t ht_slot_t;
 namespace duckdb {
     struct Functions {
     public:
-        static inline constexpr uint64_t GetSlotMask(const uint64_t bytes_per_value) {
-            return (1ULL << (bytes_per_value * 8)) - 1;
+        static inline constexpr uint64_t GetSlotMask(const uint64_t bytes_per_slot) {
+            return (1ULL << (bytes_per_slot * 8)) - 1;
         }
     };
 
-    template<idx_t bytes_per_value>
+    template<idx_t bytes_per_slot>
     struct CompressedConstants {
     public:
         //! Has 1s where the slot is, 0s elsewhere
-        static constexpr uint64_t SLOT_MASK = Functions::GetSlotMask(bytes_per_value);
+        static constexpr uint64_t SLOT_MASK = Functions::GetSlotMask(bytes_per_slot);
 
     public:
         static inline constexpr bool IsPowerOfTwo(const uint64_t value) {
@@ -44,10 +45,10 @@ namespace duckdb {
         }
 
         static inline uint64_t GetCompressedOffset(const uint64_t offset) {
-            if (IsPowerOfTwo(bytes_per_value)) {
-                return offset << GetPowerOfTwo(bytes_per_value);
+            if (IsPowerOfTwo(bytes_per_slot)) {
+                return offset << GetPowerOfTwo(bytes_per_slot);
             } else {
-                return offset * bytes_per_value;
+                return offset * bytes_per_slot;
             }
         }
 
@@ -109,8 +110,8 @@ namespace duckdb {
             }
 
             // todo, what if we are at the end of the ht? + How do we handle multithreading?
-            idx_t remaining_bytes = sizeof(uint64_t) - bytes_per_value;
-            if (remaining_bytes < bytes_per_value) {
+            idx_t remaining_bytes = sizeof(uint64_t) - bytes_per_slot;
+            if (remaining_bytes < bytes_per_slot) {
                 // todo: in theory we could check if the remaining bits are 0, if not we have a collision
                 // and could increment the offset right away
                 return false;
@@ -119,21 +120,21 @@ namespace duckdb {
             offset++;
             collisions++;
 
-            const uint64_t mask_slot_1 = (SLOT_MASK << (bytes_per_value * 8));
+            const uint64_t mask_slot_1 = (SLOT_MASK << (bytes_per_slot * 8));
 
             const uint64_t unaligned_value_slot_1 = (raw_value & mask_slot_1);
             if (unaligned_value_slot_1 == 0) {
-                const uint64_t value_shifted = value << (bytes_per_value * 8);
+                const uint64_t value_shifted = value << (bytes_per_slot * 8);
                 const auto new_value = raw_value | value_shifted;
                 WriteRawValueAtPointer(ptr, new_value);
                 return true;
             } else {
-                remaining_bytes -= bytes_per_value;
+                remaining_bytes -= bytes_per_slot;
                 if (remaining_bytes < 1) {
                     return false;
                 }
 
-                const uint64_t mask_slot_2 = mask_slot_1 << (bytes_per_value * 8);
+                const uint64_t mask_slot_2 = mask_slot_1 << (bytes_per_slot * 8);
                 const uint64_t unaligned_value_slot_2 = (raw_value & mask_slot_2);
 
                 const bool is_filled = unaligned_value_slot_2 != 0;
@@ -148,13 +149,18 @@ namespace duckdb {
     class CompressedPartitioned : PartitionedHashTable {
     public:
         unique_ptr<RowLayoutPartition> continuous_partition;
-        uint64_t bytes_per_value;
+        uint64_t bytes_per_slot;
 
         data_ptr_t ht_allocation_compressed;
+        uint8_t *ht_1;
+        uint8_t *ht_2;
 
         vector<compressed_vector_equality_function_t> compressed_vector_eq_functions;
         vector<uint8_t> compressed_value_widths;
         uint64_t continuous_row_width;
+
+        static constexpr uint8_t GROUP_SIZE = 16;
+        static constexpr uint32_t BLOCK_SIZE = 16;
 
         CompressedPartitioned(uint64_t number_of_records, MemoryManager &memory_manager,
                               const vector<column_t> &keys) : PartitionedHashTable(
@@ -163,10 +169,10 @@ namespace duckdb {
 
         void PostProcessBuild(RowLayout &layout, uint8_t partition_bits) override {
             const double bits_float = std::log2(static_cast<double>(number_of_records));
-            const auto bits_per_value = static_cast<uint64_t>(ceil(bits_float));
-            bytes_per_value = (bits_per_value + 7) / 8;
+            const auto bits_per_slot = static_cast<uint64_t>(ceil(bits_float));
+            bytes_per_slot = (bits_per_slot + 7) / 8;
 
-            switch (bytes_per_value) {
+            switch (bytes_per_slot) {
                 case 1:
                     PostProcessBuildIternal<1>(layout, partition_bits);
                     break;
@@ -189,89 +195,110 @@ namespace duckdb {
                     PostProcessBuildIternal<7>(layout, partition_bits);
                     break;
                 default:
-                    throw std::runtime_error("Unsupported bytes per value: " + std::to_string(bytes_per_value));
+                    throw std::runtime_error("Unsupported bytes per value: " + std::to_string(bytes_per_slot));
             }
-        }
-
-
-        static data_ptr_t CopyCompressedRow(uint8_t *row_source_ptr, uint8_t * row_target_ptr,
-                                            const vector<uint64_t> &value_offsets,
-                                            const vector<uint64_t> &value_offsets_compressed,
-                                            const uint64_t next_pointer_offset,
-                                            const vector<uint8_t> &compressed_value_widths) {
-            column_t n_cols = value_offsets_compressed.size();
-            for (column_t col_idx = 0; col_idx < n_cols; col_idx++) {
-                const auto value_offset = value_offsets[col_idx];
-                const auto value_offset_compressed = value_offsets_compressed[col_idx];
-                const auto compressed_width = compressed_value_widths[col_idx];
-
-                const auto __restrict value_source_ptr = row_source_ptr + value_offset;
-                const auto __restrict value_target_ptr = row_target_ptr + value_offset_compressed;
-
-                // write the compressed value to the target
-                std::memcpy(value_target_ptr, value_source_ptr, compressed_width);
-            }
-
-            return cast_uint64_to_pointer(Load<uint64_t>(row_source_ptr + next_pointer_offset));
         }
 
         uint64_t GetHTSize(const uint64_t n_partitions) const override {
-            return (capacity * bytes_per_value) / n_partitions;
+            return (capacity * bytes_per_slot) / n_partitions;
         }
 
-        template<idx_t BYTES_PER_VALUE>
+        uint8_t found_buffer[STANDARD_VECTOR_SIZE];
+        uint8_t compute_buffer[GROUP_SIZE];
+
+
         idx_t GetKeysToCompareInternal(const idx_t remaining_count, const SelectionVector &remaining_sel,
-                                       ProbeState &state) const {
+                                       ProbeState &state) {
             const auto offsets = FlatVector::GetData<uint64_t>(state.offsets_v);
-            const auto rhs_ptrs = FlatVector::GetData<data_ptr_t>(state.rhs_row_pointers_v);
+            const auto salts = FlatVector::GetData<uint64_t>(state.salts_v);
 
             auto &key_comp_sel = state.key_comp_sel;
-            idx_t key_comp_count = 0;
-
-            using Constants = CompressedConstants<BYTES_PER_VALUE>;
-            data_ptr_t start_ptr = ht_allocation_compressed;
-            data_ptr_t continuous_start = continuous_partition->data;
-
+            idx_t found_count = 0;
             // find empty or filled slots, add filled slots to the key_comp_sel
             for (idx_t idx = 0; idx < remaining_count; idx++) {
                 const auto remaining_idx = state.remaining_sel.get_index(idx);
+                const auto salt = salts[remaining_idx];
+                const auto salt_8 = static_cast<uint8_t>(salt >> 56) | 1; // never 0
+                // integer division by GROUP_BYTES
                 const auto ht_offset = offsets[remaining_idx];
-                while (true) {
-                    const uint64_t ht_slot = Constants::ReadValueAtOffset(start_ptr, ht_offset);
-                    if (ht_slot == 0) {
-                        break;
-                    }
-                    // we need to compare the keys
-                    rhs_ptrs[remaining_idx] = continuous_start + ht_slot * continuous_row_width;
-                    key_comp_sel.set_index(key_comp_count, remaining_idx);
-                    key_comp_count++;
-                    break;
-                }
+                const auto found_idx = ProbeGroup(salt_8, ht_1, ht_offset, compute_buffer, GROUP_SIZE);
+                const bool full = ht_1[ht_offset + found_idx] != 0;
+                found_buffer[found_count] = found_idx;
+                key_comp_sel.set_index(found_count, remaining_idx);
+                found_count += full;
             }
 
-            return key_comp_count;
+            GetPointersForMatches(remaining_count, remaining_sel, state, found_count);
+            return found_count;
+        }
+
+        void GetPointersForMatches(const idx_t remaining_count, const SelectionVector &remaining_sel,
+                                   ProbeState &state, idx_t found_count) {
+            switch (bytes_per_slot) {
+                case 1:
+                    GetPointersForMatchesInternal<1>(remaining_count, remaining_sel, state, found_count);
+                    break;
+                case 2:
+                    GetPointersForMatchesInternal<2>(remaining_count, remaining_sel, state, found_count);
+                    break;
+                case 3:
+                    GetPointersForMatchesInternal<3>(remaining_count, remaining_sel, state, found_count);
+                    break;
+                case 4:
+                    GetPointersForMatchesInternal<4>(remaining_count, remaining_sel, state, found_count);
+                    break;
+                case 5:
+                    GetPointersForMatchesInternal<5>(remaining_count, remaining_sel, state, found_count);
+                    break;
+                case 6:
+                    GetPointersForMatchesInternal<6>(remaining_count, remaining_sel, state, found_count);
+                    break;
+                case 7:
+                    GetPointersForMatchesInternal<7>(remaining_count, remaining_sel, state, found_count);
+                    break;
+                default:
+                    throw std::runtime_error("Unsupported bytes per value: " + std::to_string(bytes_per_slot));
+            }
+        }
+
+        template<idx_t BYTES_PER_SLOT>
+        void GetPointersForMatchesInternal(const idx_t remaining_count, const SelectionVector &remaining_sel,
+                                           ProbeState &state, idx_t found_count) {
+            const auto rhs_ptrs = FlatVector::GetData<data_ptr_t>(state.rhs_row_pointers_v);
+            const auto offsets = FlatVector::GetData<uint64_t>(state.offsets_v);
+
+            data_ptr_t continuous_start = continuous_partition->data;
+
+            using Constants = CompressedConstants<BYTES_PER_SLOT>;
+
+            // std::cout << "GetPointersForMatchesInternal: FoundCount=" << found_count << '\n';
+
+            // find empty or filled slots, add filled slots to the key_comp_sel
+            for (idx_t idx = 0; idx < found_count; idx++) {
+                const auto sel_idx = state.key_comp_sel.get_index(idx);
+
+                const uint64_t found_idx = static_cast<uint64_t>(found_buffer[idx]);
+                const auto ht_offset = offsets[sel_idx] + found_idx;
+
+                const auto group_idx = ht_offset / GROUP_SIZE;
+                const auto group_offset = group_idx * GROUP_SIZE;
+
+                const auto max_offset_within_group = ht_offset - group_offset;
+                const auto chains_in_group = GetFullValuesFromGroupSlow(ht_1, group_offset, max_offset_within_group);
+
+                const auto key_base_offset = Constants::ReadValueAtOffset(ht_2, group_idx);
+                const auto key_actual_offset = key_base_offset + chains_in_group;
+
+                rhs_ptrs[sel_idx] = continuous_start + key_actual_offset * continuous_row_width;
+
+                // std::cout << "Key=" << sel_idx << " BaseOffset=" << key_base_offset << " ActualOffset=" << key_actual_offset << '\n';
+
+            }
         }
 
         idx_t GetKeysToCompare(const idx_t remaining_count, const SelectionVector &remaining_sel,
                                ProbeState &state) override {
-            switch (bytes_per_value) {
-                case 1:
-                    return GetKeysToCompareInternal<1>(remaining_count, remaining_sel, state);
-                case 2:
-                    return GetKeysToCompareInternal<2>(remaining_count, remaining_sel, state);
-                case 3:
-                    return GetKeysToCompareInternal<3>(remaining_count, remaining_sel, state);
-                case 4:
-                    return GetKeysToCompareInternal<4>(remaining_count, remaining_sel, state);
-                case 5:
-                    return GetKeysToCompareInternal<5>(remaining_count, remaining_sel, state);
-                case 6:
-                    return GetKeysToCompareInternal<6>(remaining_count, remaining_sel, state);
-                case 7:
-                    return GetKeysToCompareInternal<7>(remaining_count, remaining_sel, state);
-                default:
-                    throw std::runtime_error("Unsupported bytes per value: " + std::to_string(bytes_per_value));
-            }
+            return GetKeysToCompareInternal(remaining_count, remaining_sel, state);
         }
 
         idx_t CompareKeys(const Vector &keys_v, ProbeState &state, const idx_t key_comp_count) const override {
@@ -299,88 +326,88 @@ namespace duckdb {
             return widths;
         }
 
-        data_ptr_t CreatePrefixSum(const RowLayout &layout, const idx_t capacity,
-                                   const idx_t next_pointer_offset) const {
-            data_ptr_t prefix_sum_ptr = memory_manager.allocate(sizeof(uint32_t) * capacity);
+        struct CopyTask {
+            data_ptr_t from;
+            data_ptr_t to;
+        };
 
-            float entries_per_slot = static_cast<float>(layout.row_count) / static_cast<float>(capacity);
+        template<idx_t BYTES_PER_SLOT>
+        data_ptr_t CreateTasksAndFillHTs(const RowLayout &layout, const idx_t capacity,
+                                             const idx_t next_pointer_offset) const {
 
-
-            auto *prefix_sum = reinterpret_cast<uint32_t *>(prefix_sum_ptr);
-
-            constexpr uint32_t BLOCK_SIZE = 4096;
-
-            uint16_t mask[BLOCK_SIZE];
-
-            uint32_t block_prefix_sum = 0;
-
-            float max_error = 0;
-            float min_error = 0;
-
-            for (idx_t block_idx = 0; block_idx < capacity; block_idx += BLOCK_SIZE) {
-                idx_t n_filled = 0;
+            // in the last iteration, there could be that we have already the whole ht values through but there are
+            // trailing empty slots which would cause a buffer overflow
+            data_ptr_t copy_tasks_ptr = memory_manager.allocate((layout.row_count + 1) * sizeof(CopyTask) );
 
 
-                for (idx_t element_idx = 0; element_idx < BLOCK_SIZE; element_idx++) {
-                    const idx_t ht_idx = block_idx + element_idx;
-                    const bool is_full = ht[ht_idx] != 0;
-                    mask[element_idx] = is_full;
-                    n_filled += is_full;
+            auto *copy_tasks = reinterpret_cast<CopyTask *>(copy_tasks_ptr);
+
+            using Constants = CompressedConstants<BYTES_PER_SLOT>;
+
+            data_ptr_t continuous_start = continuous_partition->data;
+
+            uint64_t stored_values_count = 0;
+
+            for (idx_t ht_offset = 0; ht_offset < capacity; ht_offset += 1) {
+
+                const data_ptr_t from = cast_uint64_to_pointer(ht[ht_offset] & 0x0000FFFFFFFFFFFF);
+                const data_ptr_t to = continuous_start + stored_values_count * continuous_row_width;
+
+                D_ASSERT(stored_values_count <= layout.row_count);
+                copy_tasks[stored_values_count] = {from, to};
+
+                // get the salt and store it in the ht_1
+                const uint8_t salt = ht[ht_offset] >> (8 - sizeof(uint8_t)) * 8;
+                const bool is_full = ht[ht_offset] != 0;
+                ht_1[ht_offset] = salt | is_full; // never allow 0, this is the empty slot, if empty store 0!
+
+                // write to ht_2 if element_idx is divisible by GROUP_SIZE
+                if (ht_offset % GROUP_SIZE == 0) {
+                    Constants::WriteValueAtOffset(ht_2, ht_offset / GROUP_SIZE, stored_values_count);
+                    // std::cout << "Group=" << ht_offset / GROUP_SIZE << "->" << stored_values_count << '\n';
                 }
 
-                // get the running sum of the mask
-                for (idx_t element_idx = 1; element_idx < BLOCK_SIZE; element_idx++) {
-                    mask[element_idx] += mask[element_idx - 1];
+
+
+                if (is_full) {
+                    const uint64_t key = Load<uint64_t>(from);
+                    // std::cout << "Continuous=" << stored_values_count << "->" << key << " (HTOffset=" << ht_offset << ")\n";
                 }
 
-                float local_max_error = 0;
-                float local_min_error = 0;
 
-                for (idx_t element_idx = 0; element_idx < BLOCK_SIZE; element_idx++) {
-                    const idx_t ht_idx = block_idx + element_idx;
-                    const uint32_t local_prefix_sum = mask[element_idx];
-                    const uint32_t global_prefix_sum = block_prefix_sum + local_prefix_sum;
-                    prefix_sum[ht_idx] = global_prefix_sum;
+                stored_values_count += is_full;
 
-                    // ht_idx * entries_per_slot is the expected value
-                    // const float expected_value = static_cast<float>(ht_idx) * entries_per_slot;
-                    // const auto actual_value = static_cast<float>(global_prefix_sum);
-                    // const auto error = expected_value - actual_value;
-                    // local_max_error = std::max(max_error, error);
-                    // local_min_error = std::min(min_error, error);
-                }
-
-                max_error = std::max(max_error, local_max_error);
-                min_error = std::min(min_error, local_min_error);
-
-                block_prefix_sum += mask[BLOCK_SIZE - 1];
             }
 
+            D_ASSERT(stored_values_count == layout.row_count);
             // std::cout << "MaxError=" << max_error << " MinError=" << min_error << ' ';
-            return prefix_sum_ptr;
+            return copy_tasks_ptr;
         }
 
 
-        template<idx_t BYTES_PER_VALUE>
-        __attribute__((noinline))  void Copy(const size_t main_block_idx, const size_t occupied_block_idx, size_t occupied_inner_idx,
-                  const uint16_t *mask, const uint32_t *prefix_sum, data_ptr_t continuous_start,
-                  const vector<uint64_t> &value_offsets, const vector<uint64_t> &value_offsets_compressed,
-                  const idx_t next_pointer_offset) {
-            using Constants = CompressedConstants<BYTES_PER_VALUE>;
+        __attribute__((noinline)) void Copy(const size_t element_idx,
+                                            const CopyTask *copy_tasks,
+                                            const vector<uint64_t> &value_offsets,
+                                            const vector<uint64_t> &value_offsets_compressed) {
 
-            const size_t idx = occupied_block_idx + occupied_inner_idx;
-            const size_t ht_offset = main_block_idx + mask[idx];
-            const uint32_t row_offset = prefix_sum[ht_offset];
-            Constants::WriteValueAtOffset(ht_allocation_compressed, ht_offset, row_offset);
+            const CopyTask task = copy_tasks[element_idx];
 
-            data_ptr_t __restrict row_source_ptr = cast_uint64_to_pointer(ht[ht_offset] & SLOT_MASK);
-            data_ptr_t __restrict row_target_ptr = continuous_start + row_offset * continuous_row_width;
+            column_t n_cols = value_offsets_compressed.size();
+            for (column_t col_idx = 0; col_idx < n_cols; col_idx++) {
+                const auto value_offset = value_offsets[col_idx];
+                const auto value_offset_compressed = value_offsets_compressed[col_idx];
+                const auto compressed_width = compressed_value_widths[col_idx];
+                // todo: target aligned 64bit writes because 8 bit write will trigger 64 bit read + mask + or + write
+                // todo: Do this vectorized: first fill vector of these sizes, then write them to the target ->
+                // todo: overhead of masking and shifting reduced, loop at frame of reference encoding
+                const auto __restrict value_source_ptr = task.from + value_offset;
+                const auto __restrict value_target_ptr = task.to + value_offset_compressed;
 
-            uint64_t read_offset = Constants::ReadValueAtOffset(ht_allocation_compressed, ht_offset);
-            D_ASSERT(read_offset == row_offset);
-            CopyCompressedRow(row_source_ptr, row_target_ptr, value_offsets,
-                        value_offsets_compressed, next_pointer_offset,
-                        compressed_value_widths);
+                // write the compressed value to the target
+                std::memcpy(value_target_ptr, value_source_ptr, compressed_width);
+            }
+
+            // return cast_uint64_to_pointer(Load<uint64_t>(row_source_ptr + next_pointer_offset));
             // do {
             //     data_ptr_t next_ptr = CopyCompressedRow(row_source_ptr, row_target_ptr, value_offsets,
             //                                             value_offsets_compressed, next_pointer_offset,
@@ -391,56 +418,35 @@ namespace duckdb {
             // } while (row_source_ptr != nullptr);
         }
 
-        template<idx_t BYTES_PER_VALUE>
-        __attribute__((noinline)) void FillContinuousLayout(const uint32_t *prefix_sum, data_ptr_t continuous_start,
-                                                            const idx_t capacity, const idx_t next_pointer_offset,
-                                                            uint64_t continuous_row_width,
-                                                            const vector<uint8_t> &compressed_value_widths,
+        __attribute__((noinline)) void FillContinuousLayout(const CopyTask *copy_tasks, const uint64_t elements_count,
                                                             const vector<uint64_t> &value_offsets,
                                                             const vector<uint64_t> &value_offsets_compressed
         ) {
-            constexpr uint64_t MAIN_BLOCK_SIZE = 4096;
-            constexpr int64_t OCCUPIED_BLOCK_SIZE = 512;
 
-            uint16_t mask[MAIN_BLOCK_SIZE];
-
-            for (size_t main_block_idx = 0; main_block_idx < capacity; main_block_idx += MAIN_BLOCK_SIZE) {
-                for (size_t main_inner_idx = 0; main_inner_idx < MAIN_BLOCK_SIZE; main_inner_idx++) {
-                    const size_t ht_offset = main_block_idx + main_inner_idx;
-                    const bool is_occupied = ht[ht_offset] != 0;
-                    mask[main_inner_idx] = is_occupied;
-                }
-                int64_t n_occupied = 0;
-                for (size_t inner_idx = 0; inner_idx < MAIN_BLOCK_SIZE; inner_idx++) {
-                    const uint16_t is_occ = mask[inner_idx];
-                    mask[n_occupied] = inner_idx;
-                    n_occupied += is_occ;
-                }
-                int64_t occupied_block_idx = 0;
-                //  n_occupied - OCCUPIED_BLOCK_SIZE can be negative
-                for (; occupied_block_idx < n_occupied - OCCUPIED_BLOCK_SIZE;
-                     occupied_block_idx += OCCUPIED_BLOCK_SIZE) {
-                    for (size_t occupied_inner_idx = 0; occupied_inner_idx < OCCUPIED_BLOCK_SIZE; occupied_inner_idx++) {
-                        Copy<BYTES_PER_VALUE>(main_block_idx, occupied_block_idx, occupied_inner_idx, mask, prefix_sum,
-                                              continuous_start, value_offsets, value_offsets_compressed,
-                                              next_pointer_offset);
-                    }
-                }
-
-                size_t remaining = n_occupied - occupied_block_idx;
-                for (size_t occupied_inner_idx = 0; occupied_inner_idx < remaining; occupied_inner_idx++) {
-                    Copy<BYTES_PER_VALUE>(main_block_idx, occupied_block_idx, occupied_inner_idx, mask, prefix_sum,
-                      continuous_start, value_offsets, value_offsets_compressed,
-                      next_pointer_offset);
-                }
+            for (size_t element_idx = 0; element_idx < elements_count; element_idx++) {
+                Copy(element_idx, copy_tasks, value_offsets, value_offsets_compressed);
             }
         }
 
-        template<idx_t BYTES_PER_VALUE>
+
+        template<idx_t BYTES_PER_SLOT>
         void PostProcessBuildIternal(RowLayout &layout, uint8_t partition_bits) {
-            idx_t next_pointer_offset = layout.format.offsets[layout.format.types.size() - 1];
-            data_ptr_t prefix_sum_ptr = CreatePrefixSum(layout, capacity, next_pointer_offset);
-            auto *prefix_sum = reinterpret_cast<uint32_t *>(prefix_sum_ptr);
+
+            // *** ALLOCATE THE NEW COMPRESSED HT ***
+
+            // one additional group at the end that is the same as the first group
+            const uint64_t salt_region_size = capacity * sizeof(uint8_t) + GROUP_SIZE;
+            const uint16_t offset_region_size = (capacity / GROUP_SIZE) * BYTES_PER_SLOT + sizeof(uint8_t);
+
+            // offset if accessing the last elements
+            const uint64_t ht_compressed_size = salt_region_size + offset_region_size;
+            ht_allocation_compressed = memory_manager.allocate(ht_compressed_size);
+            memset(ht_allocation_compressed, 0, salt_region_size);
+
+            ht_1 = ht_allocation_compressed;
+            ht_2 = ht_allocation_compressed + salt_region_size;
+
+            // *** INITIALIZE THE CONTINUOUS LAYOUT ***
 
             // we don't need the hash anymore
             continuous_row_width = 0;
@@ -462,18 +468,25 @@ namespace duckdb {
                                                                  layout.equality_functions,
                                                                  layout.format,
                                                                  memory_manager, continuous_size);
-            data_ptr_t continuous_start = continuous_partition->data;
 
-            const uint64_t ht_compressed_size = capacity * BYTES_PER_VALUE + sizeof(uint64_t);
-            ht_allocation_compressed = memory_manager.allocate(ht_compressed_size);
-            memset(ht_allocation_compressed, 0, ht_compressed_size);
+            // *** CREATE COPY TASKS AND FILL THE HTS ***
 
-            FillContinuousLayout<BYTES_PER_VALUE>(prefix_sum, continuous_start, capacity, next_pointer_offset,
-                                                  continuous_row_width, compressed_value_widths, layout.format.offsets,
-                                                  value_offsets_compressed);
+            const idx_t next_pointer_offset = layout.format.offsets[layout.format.types.size() - 1];
+            data_ptr_t copy_tasks_ptr = CreateTasksAndFillHTs<BYTES_PER_SLOT>(layout, capacity, next_pointer_offset);
+            const auto *copy_tasks = reinterpret_cast<CopyTask *>(copy_tasks_ptr);
+
+            // *** FILL THE CONTINUOUS LAYOUT ***
+
+            FillContinuousLayout(copy_tasks, layout.row_count, layout.format.offsets,
+                                 value_offsets_compressed);
 
             memory_manager.deallocate(ht_allocation);
-            memory_manager.deallocate(prefix_sum_ptr);
+            memory_manager.deallocate(copy_tasks_ptr);
+
+            // fill the last group with the first group
+            for (idx_t i = 0; i < GROUP_SIZE; i++) {
+                ht_1[capacity + i] = ht_1[i];
+            }
         }
 
 

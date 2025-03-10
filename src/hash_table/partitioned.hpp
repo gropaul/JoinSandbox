@@ -183,8 +183,8 @@ namespace duckdb {
             // std::cout << "Partition=" << partition_idx << " Min=" << min_idx << " Max=" << max_idx << '\n';
         }
 
-        void GetInitialHTOffsetAndSalt(DataChunk &left, Vector &hashes_v,Vector &salts_v, const vector<column_t> &key_columns,
-                                       const size_t capacity_bit_shift) const {
+        static void GetInitialHTOffsetAndSalt(DataChunk &left, Vector &hashes_v,Vector &salts_v, const vector<column_t> &key_columns,
+                                       const size_t capacity_bit_shift) {
             idx_t count = left.size();
             auto &key = left.data[key_columns[0]];
             VectorOperations::Hash(key, hashes_v, count);

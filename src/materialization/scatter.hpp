@@ -103,7 +103,7 @@ namespace duckdb {
 
             const auto lhs_ptr    = &left_data[source_idx];
             // Compare against the element in 'left' at source_idx, but only the compressed width of the value
-            if (memcmp(lhs_ptr, value_ptr, COMPRESSED_WIDTH) == 0) {
+            if (DUCKDB_LIKELY(memcmp(lhs_ptr, value_ptr, COMPRESSED_WIDTH) == 0)) {
                 // Write the matching index to the result selection vector
                 equal.set_index(match_count, source_idx);
                 match_count++;

@@ -11,9 +11,11 @@ link_directories(src)
 
 add_executable(HTBench main.cpp
         src/hash_table/compressed_partitioned.hpp
+        src/hash_table/utils.hpp
         src/materialization/row_layout.hpp
         src/materialization/aggregates.hpp
         src/materialization/memory_manager.hpp
         src/materialization/memory_manager.cpp
         src/materialization/scatter.hpp)
 target_link_libraries(HTBench duckdb)
+
