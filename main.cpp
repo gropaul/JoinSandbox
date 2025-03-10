@@ -17,8 +17,8 @@ uint64_t time(time_point<high_resolution_clock> start, const string &name = "") 
 // // // // const string BUILD_QUERY = "SELECT CAST(range as uint64) as key FROM range(64);";
 // const string PROBE_QUERY = "PRAGMA disabled_optimizers='top_n';WITH values AS (SELECT key FROM probe_100m LIMIT 10_000_000) SELECT * FROM values ORDER BY hash(key*23);";
 
-const string BUILD_QUERY = "SELECT CAST(range as uint64) as key FROM range(140_000)";
-const string PROBE_QUERY = "SELECT CAST(range as uint64) as key FROM range(140_000)";
+const string BUILD_QUERY = "SELECT CAST(range as uint64) as key FROM range(10_000_000)";
+const string PROBE_QUERY = "SELECT CAST(range as uint64) as key FROM range(100_000_000)";
 
 uint64_t TestProbe(HashTableBase *hash_table, Connection &con, const vector<LogicalType> &build_types, uint8_t partition_bits) {
     // *** GETTING THE PROBE DATA ***
@@ -120,10 +120,10 @@ int main() {
     constexpr uint64_t PARTITION_STEP_SIZE = 1;
     for (uint64_t run = 0; run < N_RUNS; run++) {
         // std::cout << "*********** Run " << run << " ***********" << '\n';
-        // for (uint8_t i = START_PARTITION_BITS; i < MAX_PARTITION_BITS; i += PARTITION_STEP_SIZE) {
-        //     std::cout << "PARTITIONED:            ";
-        //     test_materialization(i, LINEAR_PROBING_PARTITIONED, con);
-        // }
+        for (uint8_t i = START_PARTITION_BITS; i < MAX_PARTITION_BITS; i += PARTITION_STEP_SIZE) {
+            std::cout << "PARTITIONED:            ";
+            test_materialization(i, LINEAR_PROBING_PARTITIONED, con);
+        }
         for (uint8_t i = START_PARTITION_BITS; i < MAX_PARTITION_BITS; i += PARTITION_STEP_SIZE) {
             std::cout << "PARTITIONED_COMPRESSED: ";
             test_materialization(i, LINEAR_PROBING_PARTITIONED_COMPRESSED, con);

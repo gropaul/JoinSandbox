@@ -200,7 +200,7 @@ namespace duckdb {
         }
 
         uint64_t GetHTSize(const uint64_t n_partitions) const override {
-            return (capacity * bytes_per_slot) / n_partitions;
+            return ((capacity * bytes_per_slot / GROUP_SIZE)  + capacity) / n_partitions;
         }
 
         uint8_t found_buffer[STANDARD_VECTOR_SIZE];
@@ -436,7 +436,7 @@ namespace duckdb {
 
             // one additional group at the end that is the same as the first group
             const uint64_t salt_region_size = capacity * sizeof(uint8_t) + GROUP_SIZE;
-            const uint16_t offset_region_size = (capacity / GROUP_SIZE) * BYTES_PER_SLOT + sizeof(uint8_t);
+            const uint64_t offset_region_size = (capacity / GROUP_SIZE) * BYTES_PER_SLOT + sizeof(uint8_t);
 
             // offset if accessing the last elements
             const uint64_t ht_compressed_size = salt_region_size + offset_region_size;
