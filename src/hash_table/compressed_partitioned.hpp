@@ -267,15 +267,15 @@ namespace duckdb {
         idx_t __attribute__((noinline)) GetKeysToCompareInternal(const idx_t remaining_count, const SelectionVector &remaining_sel,
                                        ProbeState &state, uint8_t * __restrict compute_buffer, const uint8_t * __restrict ht_l) {
 
-            const auto __restrict offsets = FlatVector::GetData<uint64_t>(state.offsets_v);
-            const auto __restrict salts = FlatVector::GetData<uint8_t>(state.salts_small_v);
+            const auto offsets = FlatVector::GetData<uint64_t>(state.offsets_v);
+            const auto salts = FlatVector::GetData<uint8_t>(state.salts_small_v);
 
             auto &key_comp_sel = state.key_comp_sel;
             idx_t found_count = 0;
 
             // find empty or filled slots, add filled slots to the key_comp_sel
             for (idx_t idx = 0; idx < remaining_count; idx++) {
-                const idx_t sel_idx = remaining_sel.get_index(idx);
+                const idx_t sel_idx = remaining_sel.get_index(idx); // getting rid of the sel_idx was promising
                 const uint8_t salt_8 = salts[sel_idx];
                 const uint64_t ht_offset = offsets[sel_idx];
 
