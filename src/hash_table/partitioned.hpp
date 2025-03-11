@@ -19,6 +19,7 @@ namespace duckdb {
     struct ProbeState {
         Vector offsets_v;
         Vector salts_v;
+        Vector salts_small_v;
         Vector found_row_pointers_v;
 
         // used for bulk key comparison
@@ -33,7 +34,7 @@ namespace duckdb {
         SelectionVector key_equal_sel;
         SelectionVector key_comp_sel;
 
-        explicit ProbeState(): offsets_v(LogicalType::HASH), salts_v(LogicalType::HASH), found_row_pointers_v(LogicalType::POINTER),
+        explicit ProbeState(): offsets_v(LogicalType::HASH), salts_v(LogicalType::HASH), salts_small_v(LogicalType::UTINYINT), found_row_pointers_v(LogicalType::POINTER),
                                rhs_row_pointers_v(LogicalType::POINTER), found_count(0),
                                found_sel(STANDARD_VECTOR_SIZE), remaining_sel(STANDARD_VECTOR_SIZE),
                                key_equal_sel(STANDARD_VECTOR_SIZE),
@@ -130,8 +131,6 @@ namespace duckdb {
 
             elements_build += count;
 
-
-
             for (uint64_t i = 0; i < count; i++) {
                 auto lhs_row_pointer = row_pointer_data[i];
                 const auto hash = hashes_data[i];
@@ -183,18 +182,19 @@ namespace duckdb {
             // std::cout << "Partition=" << partition_idx << " Min=" << min_idx << " Max=" << max_idx << '\n';
         }
 
-        static void GetInitialHTOffsetAndSalt(DataChunk &left, Vector &hashes_v,Vector &salts_v, const vector<column_t> &key_columns,
+
+        virtual void GetInitialHTOffsetAndSalt(DataChunk &left, ProbeState &state, const vector<column_t> &key_columns,
                                        const size_t capacity_bit_shift) {
             idx_t count = left.size();
             auto &key = left.data[key_columns[0]];
-            VectorOperations::Hash(key, hashes_v, count);
+            VectorOperations::Hash(key, state.offsets_v, count);
 
             for (idx_t i = 1; i < key_columns.size(); i++) {
                 auto &combined_key = left.data[key_columns[i]];
-                VectorOperations::CombineHash(hashes_v, combined_key, count);
+                VectorOperations::CombineHash(state.offsets_v, combined_key, count);
             }
-            auto hashes = FlatVector::GetData<uint64_t>(hashes_v);
-            auto salts = FlatVector::GetData<uint64_t>(salts_v);
+            auto hashes = FlatVector::GetData<uint64_t>(state.offsets_v);
+            auto salts = FlatVector::GetData<uint64_t>(state.salts_v);
             for (idx_t i = 0; i < count; i++) {
                 salts[i] = hashes[i] << SALT_SHIFT;
                 hashes[i] = hashes[i] >> capacity_bit_shift;
@@ -250,7 +250,7 @@ namespace duckdb {
         }
 
         idx_t GetRowPointers(DataChunk &left, ProbeState &state) {
-            GetInitialHTOffsetAndSalt(left, state.offsets_v, state.salts_v, key_columns, capacity_bit_shift);
+            GetInitialHTOffsetAndSalt(left, state, key_columns, capacity_bit_shift);
 
             const auto keys_v = left.data[key_columns[0]];
             D_ASSERT(keys_v.GetType() == LogicalType::UBIGINT);

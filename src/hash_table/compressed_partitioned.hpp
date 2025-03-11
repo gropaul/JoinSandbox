@@ -199,61 +199,121 @@ namespace duckdb {
         }
 
         uint64_t GetHTSize(const uint64_t n_partitions) const override {
-            return ((capacity * bytes_per_slot / GROUP_SIZE)  + capacity) / n_partitions;
+            return ((capacity * bytes_per_slot / GROUP_SIZE) + capacity) / n_partitions;
+        }
+
+        void GetInitialHTOffsetAndSalt(DataChunk &left, ProbeState &state, const vector<column_t> &key_columns,
+                                       const size_t capacity_bit_shift) override {
+            idx_t count = left.size();
+            auto &key = left.data[key_columns[0]];
+            VectorOperations::Hash(key, state.offsets_v, count);
+
+            for (idx_t i = 1; i < key_columns.size(); i++) {
+                auto &combined_key = left.data[key_columns[i]];
+                VectorOperations::CombineHash(state.offsets_v, combined_key, count);
+            }
+
+            const auto hashes = FlatVector::GetData<uint64_t>(state.offsets_v);
+            const auto salts_small = FlatVector::GetData<uint8_t>(state.salts_small_v);
+            for (idx_t i = 0; i < count; i++) {
+                uint8_t salt = (hashes[i] << SALT_SHIFT >> 64 - 8);
+                if (salt == 0) {
+                    salt = 1;
+                }
+                salts_small[i] = salt;
+                hashes[i] = hashes[i] >> capacity_bit_shift;
+            }
+        }
+
+        uint64_t Trailing(uint64_t value_in) {
+            if (!value_in) {
+                return 64;
+            }
+            uint64_t value = value_in;
+
+            constexpr uint64_t index64lsb[] = {63, 0,  58, 1,  59, 47, 53, 2,  60, 39, 48, 27, 54, 33, 42, 3,
+                                                61, 51, 37, 40, 49, 18, 28, 20, 55, 30, 34, 11, 43, 14, 22, 4,
+                                                62, 57, 46, 52, 38, 26, 32, 41, 50, 36, 17, 19, 29, 10, 13, 21,
+                                                56, 45, 25, 31, 35, 16, 9,  12, 44, 24, 15, 8,  23, 7,  6,  5};
+            constexpr uint64_t debruijn64lsb = 0x07EDD5E59A4E28C2ULL;
+            auto result = index64lsb[((value & -value) * debruijn64lsb) >> 58];
+
+            return result;
+        }
+
+        uint64_t ProbeGroup(const uint8_t salt, const uint8_t * __restrict ht_1, const uint64_t start_offset,
+                                   uint8_t * __restrict buffer) {
+
+            #pragma clang loop unroll(disable)
+            for (int i = 0; i < GROUP_SIZE; i++) {
+                buffer[i] = (ht_1[start_offset + i] == salt | ht_1[start_offset + i] == 0) ? 0xFF : 0;
+            }
+
+            const auto lower = reinterpret_cast<uint64_t *>(&buffer[0]);
+            const auto upper = reinterpret_cast<uint64_t *>(&buffer[8]);
+
+            if (lower) {
+                return Trailing(*lower) / 8;
+            }
+            if (upper) {
+                return Trailing(*upper) / 8;
+            }
+
+            return -1;
         }
 
         uint8_t found_buffer[STANDARD_VECTOR_SIZE];
-        uint8_t compute_buffer[GROUP_SIZE];
 
+        idx_t __attribute__((noinline)) GetKeysToCompareInternal(const idx_t remaining_count, const SelectionVector &remaining_sel,
+                                       ProbeState &state, uint8_t * __restrict compute_buffer, const uint8_t * __restrict ht_l) {
 
-        idx_t GetKeysToCompareInternal(const idx_t remaining_count, const SelectionVector &remaining_sel,
-                                       ProbeState &state) {
-            const auto offsets = FlatVector::GetData<uint64_t>(state.offsets_v);
-            const auto salts = FlatVector::GetData<uint64_t>(state.salts_v);
+            const auto __restrict offsets = FlatVector::GetData<uint64_t>(state.offsets_v);
+            const auto __restrict salts = FlatVector::GetData<uint8_t>(state.salts_small_v);
 
             auto &key_comp_sel = state.key_comp_sel;
             idx_t found_count = 0;
+
             // find empty or filled slots, add filled slots to the key_comp_sel
             for (idx_t idx = 0; idx < remaining_count; idx++) {
-                const auto remaining_idx = state.remaining_sel.get_index(idx);
-                const auto salt = salts[remaining_idx];
-                const auto salt_8 = static_cast<uint8_t>(salt >> 56) | 1; // never 0
-                // integer division by GROUP_BYTES
-                const auto ht_offset = offsets[remaining_idx];
-                const auto found_idx = ProbeGroup(salt_8, ht_1, ht_offset, compute_buffer, GROUP_SIZE);
-                const bool full = ht_1[ht_offset + found_idx] != 0;
+                const idx_t sel_idx = remaining_sel.get_index(idx);
+                const uint8_t salt_8 = salts[sel_idx];
+                const uint64_t ht_offset = offsets[sel_idx];
+
+                idx_t found_idx = ProbeGroup(salt_8, ht_1, ht_offset, compute_buffer);
+
+                const bool full = ht_l[ht_offset + found_idx] != 0;
                 found_buffer[found_count] = found_idx;
-                key_comp_sel.set_index(found_count, remaining_idx);
+                key_comp_sel.set_index(found_count, sel_idx);
                 found_count += full;
             }
 
-            GetPointersForMatches(remaining_count, remaining_sel, state, found_count);
+            GetPointersForMatches(remaining_count, remaining_sel, state, found_count, found_buffer);
             return found_count;
         }
 
-        void GetPointersForMatches(const idx_t remaining_count, const SelectionVector &remaining_sel,
-                                   ProbeState &state, idx_t found_count) {
+        void __attribute__((noinline)) GetPointersForMatches(const idx_t remaining_count, const SelectionVector &remaining_sel,
+                                   ProbeState &state, const idx_t found_count, const uint8_t *found_buffer) {
             switch (bytes_per_slot) {
                 case 1:
-                    GetPointersForMatchesInternal<1>(remaining_count, remaining_sel, state, found_count);
+                    GetPointersForMatchesInternal<1>(remaining_count, remaining_sel, state, found_count, found_buffer);
                     break;
                 case 2:
-                    GetPointersForMatchesInternal<2>(remaining_count, remaining_sel, state, found_count);
+                    GetPointersForMatchesInternal<2>(remaining_count, remaining_sel, state, found_count, found_buffer);
                     break;
                 case 3:
-                    GetPointersForMatchesInternal<3>(remaining_count, remaining_sel, state, found_count);
+                    GetPointersForMatchesInternal<3>(remaining_count, remaining_sel, state, found_count, found_buffer);
                     break;
                 case 4:
-                    GetPointersForMatchesInternal<4>(remaining_count, remaining_sel, state, found_count);
+                    GetPointersForMatchesInternal<4>(remaining_count, remaining_sel, state, found_count, found_buffer);
                     break;
                 case 5:
-                    GetPointersForMatchesInternal<5>(remaining_count, remaining_sel, state, found_count);
+                    GetPointersForMatchesInternal<5>(remaining_count, remaining_sel, state, found_count, found_buffer);
                     break;
                 case 6:
-                    GetPointersForMatchesInternal<6>(remaining_count, remaining_sel, state, found_count);
+                    GetPointersForMatchesInternal<6>(remaining_count, remaining_sel, state, found_count, found_buffer);
                     break;
                 case 7:
-                    GetPointersForMatchesInternal<7>(remaining_count, remaining_sel, state, found_count);
+                    GetPointersForMatchesInternal<7>(remaining_count, remaining_sel, state, found_count, found_buffer);
                     break;
                 default:
                     throw std::runtime_error("Unsupported bytes per value: " + std::to_string(bytes_per_slot));
@@ -262,7 +322,7 @@ namespace duckdb {
 
         template<idx_t BYTES_PER_SLOT>
         void GetPointersForMatchesInternal(const idx_t remaining_count, const SelectionVector &remaining_sel,
-                                           ProbeState &state, idx_t found_count) {
+                                           ProbeState &state, const idx_t found_count, const uint8_t *found_buffer) {
             const auto rhs_ptrs = FlatVector::GetData<data_ptr_t>(state.rhs_row_pointers_v);
             const auto offsets = FlatVector::GetData<uint64_t>(state.offsets_v);
 
@@ -291,13 +351,13 @@ namespace duckdb {
                 rhs_ptrs[sel_idx] = continuous_start + key_actual_offset * continuous_row_width;
 
                 // std::cout << "Key=" << sel_idx << " BaseOffset=" << key_base_offset << " ActualOffset=" << key_actual_offset << '\n';
-
             }
         }
+        uint8_t compute_buffer[GROUP_SIZE];
 
         idx_t GetKeysToCompare(const idx_t remaining_count, const SelectionVector &remaining_sel,
                                ProbeState &state) override {
-            return GetKeysToCompareInternal(remaining_count, remaining_sel, state);
+            return GetKeysToCompareInternal(remaining_count, remaining_sel, state, compute_buffer, ht_1);
         }
 
         idx_t CompareKeys(const Vector &keys_v, ProbeState &state, const idx_t key_comp_count) const override {
@@ -310,8 +370,8 @@ namespace duckdb {
         }
 
 
-        vector<uint64_t> col_min_values;
 
+        vector<uint64_t> col_min_values;
         vector<uint8_t> GetCompressedValueWidths(RowLayout &layout) {
             vector<uint8_t> widths;
             for (const auto &range: layout.min_max_ranges) {
@@ -332,11 +392,10 @@ namespace duckdb {
 
         template<idx_t BYTES_PER_SLOT>
         data_ptr_t CreateTasksAndFillHTs(const RowLayout &layout, const idx_t capacity,
-                                             const idx_t next_pointer_offset) const {
-
+                                         const idx_t next_pointer_offset) const {
             // in the last iteration, there could be that we have already the whole ht values through but there are
             // trailing empty slots which would cause a buffer overflow
-            data_ptr_t copy_tasks_ptr = memory_manager.allocate((layout.row_count + 1) * sizeof(CopyTask) );
+            data_ptr_t copy_tasks_ptr = memory_manager.allocate((layout.row_count + 1) * sizeof(CopyTask));
 
 
             auto *copy_tasks = reinterpret_cast<CopyTask *>(copy_tasks_ptr);
@@ -348,7 +407,6 @@ namespace duckdb {
             uint64_t stored_values_count = 0;
 
             for (idx_t ht_offset = 0; ht_offset < capacity; ht_offset += 1) {
-
                 const data_ptr_t from = cast_uint64_to_pointer(ht[ht_offset] & 0x0000FFFFFFFFFFFF);
                 const data_ptr_t to = continuous_start + stored_values_count * continuous_row_width;
 
@@ -356,16 +414,20 @@ namespace duckdb {
                 copy_tasks[stored_values_count] = {from, to};
 
                 // get the salt and store it in the ht_1
-                const uint8_t salt = ht[ht_offset] >> (8 - sizeof(uint8_t)) * 8;
+                uint8_t salt = ht[ht_offset] >> (8 - sizeof(uint8_t)) * 8;
+
                 const bool is_full = ht[ht_offset] != 0;
-                ht_1[ht_offset] = salt | is_full; // never allow 0, this is the empty slot, if empty store 0!
+                if (salt == 0 && is_full) {
+                    salt = 1;
+                }
+
+                ht_1[ht_offset] = salt; // never allow 0, this is the empty slot, if empty store 0!
 
                 // write to ht_2 if element_idx is divisible by GROUP_SIZE
                 if (ht_offset % GROUP_SIZE == 0) {
                     Constants::WriteValueAtOffset(ht_2, ht_offset / GROUP_SIZE, stored_values_count);
                     // std::cout << "Group=" << ht_offset / GROUP_SIZE << "->" << stored_values_count << '\n';
                 }
-
 
 
                 if (is_full) {
@@ -375,7 +437,6 @@ namespace duckdb {
 
 
                 stored_values_count += is_full;
-
             }
 
             D_ASSERT(stored_values_count == layout.row_count);
@@ -388,7 +449,6 @@ namespace duckdb {
                                             const CopyTask *copy_tasks,
                                             const vector<uint64_t> &value_offsets,
                                             const vector<uint64_t> &value_offsets_compressed) {
-
             const CopyTask task = copy_tasks[element_idx];
 
             column_t n_cols = value_offsets_compressed.size();
@@ -421,7 +481,6 @@ namespace duckdb {
                                                             const vector<uint64_t> &value_offsets,
                                                             const vector<uint64_t> &value_offsets_compressed
         ) {
-
             for (size_t element_idx = 0; element_idx < elements_count; element_idx++) {
                 Copy(element_idx, copy_tasks, value_offsets, value_offsets_compressed);
             }
@@ -430,7 +489,6 @@ namespace duckdb {
 
         template<idx_t BYTES_PER_SLOT>
         void PostProcessBuildIternal(RowLayout &layout, uint8_t partition_bits) {
-
             // *** ALLOCATE THE NEW COMPRESSED HT ***
 
             // one additional group at the end that is the same as the first group
