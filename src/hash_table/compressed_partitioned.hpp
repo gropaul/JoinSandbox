@@ -214,13 +214,14 @@ namespace duckdb {
             }
 
             const auto hashes = FlatVector::GetData<uint64_t>(state.offsets_v);
-            const auto salts_small = FlatVector::GetData<uint8_t>(state.salts_small_v);
+            const auto salts_small = FlatVector::GetData<uint64_t>(state.salts_small_v);
             for (idx_t i = 0; i < count; i++) {
-                uint8_t salt = (hashes[i] << SALT_SHIFT >> 64 - 8);
+                uint64_t salt = (hashes[i] << SALT_SHIFT >> 64 - 8);
                 if (salt == 0) {
                     salt = 1;
                 }
-                salts_small[i] = salt;
+                uint64_t salt_u = 0x0101010101010101ULL * salt;
+                salts_small[i] = salt_u;
                 hashes[i] = hashes[i] >> capacity_bit_shift;
             }
         }
@@ -241,53 +242,56 @@ namespace duckdb {
             return result;
         }
 
-        uint64_t ProbeGroup(const uint8_t salt, const uint8_t * __restrict ht_1, const uint64_t start_offset,
-                                   uint8_t * __restrict buffer) {
 
-            #pragma clang loop unroll(disable)
-            for (int i = 0; i < GROUP_SIZE; i++) {
-                buffer[i] = (ht_1[start_offset + i] == salt | ht_1[start_offset + i] == 0) ? 0xFF : 0;
-            }
-
-            const auto lower = reinterpret_cast<uint64_t *>(&buffer[0]);
-            const auto upper = reinterpret_cast<uint64_t *>(&buffer[8]);
-
-            if (lower) {
-                return Trailing(*lower) / 8;
-            }
-            if (upper) {
-                return Trailing(*upper) / 8;
-            }
-
-            return -1;
+        static uint64_t zero_byte_mask(uint64_t x) {
+            return (x - 0x0101010101010101ULL) & ~x;
         }
+
+        static uint64_t ProbeGroupUint64(const uint64_t salt, uint8_t* __restrict ht_1, const uint64_t group_offset, uint64_t &full){
+
+            const auto ht_ptr = reinterpret_cast<uint64_t*>(&ht_1[group_offset]);
+
+            const uint64_t ht_u = *ht_ptr;
+            const uint64_t salt_match = salt ^ ht_u;
+
+            const uint64_t match = ht_u & salt_match;
+            const uint64_t zero_mask = zero_byte_mask(match);
+
+            const uint64_t idx_bits = __builtin_ctzll(zero_mask) ;
+
+            uint64_t offset = idx_bits / 8;
+            full = ht_1[group_offset + offset] != 0;
+
+            return offset;
+        }
+
 
         uint8_t found_buffer[STANDARD_VECTOR_SIZE];
 
-        idx_t __attribute__((noinline)) GetKeysToCompareInternal(const idx_t remaining_count, const SelectionVector &remaining_sel,
-                                       ProbeState &state, uint8_t * __restrict compute_buffer, const uint8_t * __restrict ht_l) {
+        idx_t __attribute__((noinline)) ProbeSmallHT(const idx_t remaining_count, const SelectionVector &remaining_sel,
+                                       ProbeState &state, uint8_t* __restrict salt_match, uint8_t* __restrict empty, const uint8_t * __restrict ht_l) {
 
             const auto offsets = FlatVector::GetData<uint64_t>(state.offsets_v);
-            const auto salts = FlatVector::GetData<uint8_t>(state.salts_small_v);
+            const auto salts = FlatVector::GetData<uint64_t>(state.salts_small_v);
 
             auto &key_comp_sel = state.key_comp_sel;
             idx_t found_count = 0;
 
+            uint64_t full;
+
             // find empty or filled slots, add filled slots to the key_comp_sel
             for (idx_t idx = 0; idx < remaining_count; idx++) {
-                const idx_t sel_idx = remaining_sel.get_index(idx); // getting rid of the sel_idx was promising
-                const uint8_t salt_8 = salts[sel_idx];
+                const idx_t sel_idx = remaining_sel.get_index(idx); // todo: getting rid of the sel_idx seems promising
+                // const idx_t sel_idx = idx;
+                const uint64_t salt = salts[sel_idx];
                 const uint64_t ht_offset = offsets[sel_idx];
 
-                idx_t found_idx = ProbeGroup(salt_8, ht_1, ht_offset, compute_buffer);
-
-                const bool full = ht_l[ht_offset + found_idx] != 0;
+                idx_t found_idx = ProbeGroupUint64(salt, ht_1, ht_offset, full );
                 found_buffer[found_count] = found_idx;
                 key_comp_sel.set_index(found_count, sel_idx);
                 found_count += full;
             }
 
-            GetPointersForMatches(remaining_count, remaining_sel, state, found_count, found_buffer);
             return found_count;
         }
 
@@ -353,11 +357,14 @@ namespace duckdb {
                 // std::cout << "Key=" << sel_idx << " BaseOffset=" << key_base_offset << " ActualOffset=" << key_actual_offset << '\n';
             }
         }
-        uint8_t compute_buffer[GROUP_SIZE];
+        uint8_t compute_buffer_1[GROUP_SIZE + 1];
+        uint8_t compute_buffer_2[GROUP_SIZE + 1];
 
-        idx_t GetKeysToCompare(const idx_t remaining_count, const SelectionVector &remaining_sel,
+        idx_t __attribute__((noinline)) GetKeysToCompare(const idx_t remaining_count, const SelectionVector &remaining_sel,
                                ProbeState &state) override {
-            return GetKeysToCompareInternal(remaining_count, remaining_sel, state, compute_buffer, ht_1);
+            const idx_t found_count = ProbeSmallHT(remaining_count, remaining_sel, state, compute_buffer_1, compute_buffer_2, ht_1);
+            GetPointersForMatches(remaining_count, remaining_sel, state, found_count, found_buffer);
+            return found_count;
         }
 
         idx_t CompareKeys(const Vector &keys_v, ProbeState &state, const idx_t key_comp_count) const override {

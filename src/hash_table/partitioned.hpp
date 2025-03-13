@@ -34,7 +34,7 @@ namespace duckdb {
         SelectionVector key_equal_sel;
         SelectionVector key_comp_sel;
 
-        explicit ProbeState(): offsets_v(LogicalType::HASH), salts_v(LogicalType::HASH), salts_small_v(LogicalType::UTINYINT), found_row_pointers_v(LogicalType::POINTER),
+        explicit ProbeState(): offsets_v(LogicalType::HASH), salts_v(LogicalType::HASH), salts_small_v(LogicalType::HASH), found_row_pointers_v(LogicalType::POINTER),
                                rhs_row_pointers_v(LogicalType::POINTER), found_count(0),
                                found_sel(STANDARD_VECTOR_SIZE), remaining_sel(STANDARD_VECTOR_SIZE),
                                key_equal_sel(STANDARD_VECTOR_SIZE),
