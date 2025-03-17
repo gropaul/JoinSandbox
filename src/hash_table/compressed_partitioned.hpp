@@ -216,7 +216,7 @@ namespace duckdb {
             const auto hashes = FlatVector::GetData<uint64_t>(state.offsets_v);
             const auto salts_small = FlatVector::GetData<uint8_t>(state.salts_small_v);
             for (idx_t i = 0; i < count; i++) {
-                uint8_t salt = (hashes[i] << SALT_SHIFT >> 64 - 8);
+                uint8_t salt = (hashes[i] << SALT_SHIFT >> (64 - 8));
                 if (salt == 0) {
                     salt = 1;
                 }
