@@ -60,7 +60,8 @@ namespace duckdb {
         uint64_t collisions_build = 0;
 
         uint64_t elements_probe = 0;
-        uint64_t collisions_probe = 0;
+        uint64_t collisions_probe_salt = 0;
+        uint64_t collisions_probe_key = 0;
 
         MemoryManager &memory_manager;
         const vector<column_t> &key_columns;
@@ -233,7 +234,7 @@ namespace duckdb {
                     }
 
                     ht_offset = (ht_offset + 1) & capacity_mask;
-                    collisions_probe ++;
+                    collisions_probe_salt ++;
                 }
             }
 
@@ -291,7 +292,7 @@ namespace duckdb {
                     const auto sel_idx = state.remaining_sel.get_index(i);
                     auto &ht_offset = offsets[sel_idx];
                     ht_offset = (ht_offset + 1) & capacity_mask;
-                    collisions_probe ++;
+                    collisions_probe_key ++;
                 }
 
                 remaining_count = unequal_count;
@@ -367,9 +368,14 @@ namespace duckdb {
             return static_cast<double>(collisions_build) / static_cast<double>(elements_build);
         }
 
-        double GetCollisionRateProbe() const override {
-            return static_cast<double>(collisions_probe) / static_cast<double>(elements_probe);
+        double GetCollisionRateProbeSalt() const override {
+            return static_cast<double>(collisions_probe_salt) / static_cast<double>(elements_probe);
         }
+
+        double GetCollisionRateProbeKey() const override {
+            return static_cast<double>(collisions_probe_key) / static_cast<double>(elements_probe);
+        }
+
 
         void Free() override {
             memory_manager.deallocate(ht_allocation);

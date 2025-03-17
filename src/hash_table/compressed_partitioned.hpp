@@ -252,10 +252,10 @@ namespace duckdb {
             const auto lower = reinterpret_cast<uint64_t *>(&buffer[0]);
             const auto upper = reinterpret_cast<uint64_t *>(&buffer[8]);
 
-            if (lower) {
+            if (DUCKDB_LIKELY(*lower)) {
                 return Trailing(*lower) / 8;
             }
-            if (upper) {
+            if (*upper) {
                 return Trailing(*upper) / 8;
             }
 
