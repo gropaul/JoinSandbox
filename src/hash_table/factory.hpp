@@ -16,6 +16,19 @@ namespace duckdb {
         GOOGLE
     };
 
+    static string HTTypeToString(HashTableType type) {
+        switch (type) {
+            case LINEAR_PROBING_PARTITIONED:
+                return "PARTITIONED";
+            case LINEAR_PROBING_PARTITIONED_COMPRESSED:
+                return "PARTITIONED_COMPRESSED";
+            case GOOGLE:
+                return "GOOGLE";
+            default:
+                throw std::runtime_error("Unknown hash table type");
+        }
+    }
+
     static HashTableBase *HashTableFactory(HashTableType type, uint64_t number_of_records,
                                            MemoryManager &memory_manager, const vector<column_t> &keys) {
         switch (type) {
