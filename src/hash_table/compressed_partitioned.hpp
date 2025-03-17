@@ -214,13 +214,14 @@ namespace duckdb {
             }
 
             const auto hashes = FlatVector::GetData<uint64_t>(state.offsets_v);
-            const auto salts_small = FlatVector::GetData<uint8_t>(state.salts_small_v);
+            const auto salts_small = FlatVector::GetData<uint64_t>(state.salts_small_v);
             for (idx_t i = 0; i < count; i++) {
-                uint8_t salt = (hashes[i] << SALT_SHIFT >> 64 - 8);
+                uint64_t salt = (hashes[i] << SALT_SHIFT >> 64 - 8);
                 if (salt == 0) {
                     salt = 1;
                 }
-                salts_small[i] = salt;
+                uint64_t salt_u = 0x0101010101010101ULL * salt;
+                salts_small[i] = salt_u;
                 hashes[i] = hashes[i] >> capacity_bit_shift;
             }
         }
@@ -241,25 +242,26 @@ namespace duckdb {
             return result;
         }
 
-        uint64_t ProbeGroup(const uint8_t salt, const uint8_t * __restrict ht_1, const uint64_t start_offset,
-                                   uint8_t * __restrict buffer) {
+        inline uint64_t zero_byte_mask(uint64_t x) {
+            return (x - 0x0101010101010101ULL) & ~x & 0x8080808080808080ULL;
+        }
 
-            #pragma clang loop unroll(disable)
-            for (int i = 0; i < GROUP_SIZE; i++) {
-                buffer[i] = (ht_1[start_offset + i] == salt | ht_1[start_offset + i] == 0) ? 0xFF : 0;
-            }
+        uint64_t ProbeGroupUint64(const uint64_t salt, uint8_t* __restrict ht_1, const uint64_t group_offset, uint64_t &full){
 
-            const auto lower = reinterpret_cast<uint64_t *>(&buffer[0]);
-            const auto upper = reinterpret_cast<uint64_t *>(&buffer[8]);
+            const auto ht_ptr = reinterpret_cast<uint64_t*>(&ht_1[group_offset]);
 
-            if (DUCKDB_LIKELY(*lower)) {
-                return Trailing(*lower) / 8;
-            }
-            if (*upper) {
-                return Trailing(*upper) / 8;
-            }
+            const uint64_t ht_u = *ht_ptr;
+            const uint64_t salt_match = salt ^ ht_u;
 
-            return -1;
+            const uint64_t match = ht_u & salt_match;
+            const uint64_t zero_mask = zero_byte_mask(match);
+
+            const uint64_t idx_bits = Trailing(zero_mask >> 7) ;
+
+            uint64_t offset = idx_bits / 8;
+            full = ht_1[group_offset + offset] != 0;
+
+            return offset;
         }
 
         uint8_t found_buffer[STANDARD_VECTOR_SIZE];
@@ -268,7 +270,7 @@ namespace duckdb {
                                        ProbeState &state, uint8_t * __restrict compute_buffer, const uint8_t * __restrict ht_l) {
 
             const auto offsets = FlatVector::GetData<uint64_t>(state.offsets_v);
-            const auto salts = FlatVector::GetData<uint8_t>(state.salts_small_v);
+            const auto salts = FlatVector::GetData<uint64_t>(state.salts_small_v);
 
             auto &key_comp_sel = state.key_comp_sel;
             idx_t found_count = 0;
@@ -276,12 +278,12 @@ namespace duckdb {
             // find empty or filled slots, add filled slots to the key_comp_sel
             for (idx_t idx = 0; idx < remaining_count; idx++) {
                 const idx_t sel_idx = remaining_sel.get_index(idx); // getting rid of the sel_idx was promising
-                const uint8_t salt_8 = salts[sel_idx];
+                const uint64_t salt = salts[sel_idx];
                 const uint64_t ht_offset = offsets[sel_idx];
 
-                idx_t found_idx = ProbeGroup(salt_8, ht_1, ht_offset, compute_buffer);
+                uint64_t full;
+                idx_t found_idx = ProbeGroupUint64(salt, ht_1, ht_offset, full);
 
-                const bool full = ht_l[ht_offset + found_idx] != 0;
                 found_buffer[found_count] = found_idx;
                 key_comp_sel.set_index(found_count, sel_idx);
                 found_count += full;
