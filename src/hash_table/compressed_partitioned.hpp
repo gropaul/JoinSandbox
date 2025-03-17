@@ -267,10 +267,12 @@ namespace duckdb {
         uint8_t found_buffer[STANDARD_VECTOR_SIZE];
 
         idx_t __attribute__((noinline)) GetKeysToCompareInternal(const idx_t remaining_count, const SelectionVector &remaining_sel,
-                                       ProbeState &state, uint8_t * __restrict compute_buffer, const uint8_t * __restrict ht_l) {
+                                       ProbeState &state, uint8_t * __restrict found_idx_flat_ptr, uint8_t * __restrict found_bool_flat_ptr) {
 
             const auto offsets = FlatVector::GetData<uint64_t>(state.offsets_v);
             const auto salts = FlatVector::GetData<uint64_t>(state.salts_small_v);
+            const auto salts_dense = FlatVector::GetData<uint64_t>(state.salts_small_dense_v);
+            const auto intermediates = FlatVector::GetData<uint64_t>(state.ht_intermediates_v);
 
             auto &key_comp_sel = state.key_comp_sel;
             idx_t found_count = 0;
@@ -278,15 +280,40 @@ namespace duckdb {
             // find empty or filled slots, add filled slots to the key_comp_sel
             for (idx_t idx = 0; idx < remaining_count; idx++) {
                 const idx_t sel_idx = remaining_sel.get_index(idx); // getting rid of the sel_idx was promising
-                const uint64_t salt = salts[sel_idx];
                 const uint64_t ht_offset = offsets[sel_idx];
 
-                uint64_t full;
-                idx_t found_idx = ProbeGroupUint64(salt, ht_1, ht_offset, full);
+                const auto ht_ptr = reinterpret_cast<uint64_t*>(&ht_1[ht_offset]);
+                intermediates[idx] = *ht_ptr;;
+                //
+                const uint64_t salt = salts[sel_idx];
+                salts_dense[idx] = salt;
+            }
 
+            for (idx_t idx = 0; idx < remaining_count; idx++) {
+                const uint64_t salt = salts_dense[idx];
+                const uint64_t ht_u = intermediates[idx];
+                const uint64_t salt_match = salt ^ ht_u;
+
+                const uint64_t match = ht_u & salt_match;
+                const uint64_t zero_mask = zero_byte_mask(match);
+
+                const uint64_t idx_bits = Trailing(zero_mask >> 7) ;
+                const uint64_t full_mask = 0xFFULL << idx_bits;
+                const uint64_t ht_mask = ht_u & full_mask;
+
+                const uint8_t full = (ht_mask) != 0;
+                const uint8_t found_idx = idx_bits / 8;
+                found_idx_flat_ptr[idx] = found_idx;
+                found_bool_flat_ptr[idx] = full;
+            }
+
+            for (idx_t idx = 0; idx < remaining_count; idx++) {
+                const uint64_t found_idx = found_idx_flat_ptr[idx];
+                const uint64_t found_full = found_bool_flat_ptr[idx];
+                const idx_t sel_idx = remaining_sel.get_index(idx); // getting rid of the sel_idx was promising
                 found_buffer[found_count] = found_idx;
                 key_comp_sel.set_index(found_count, sel_idx);
-                found_count += full;
+                found_count += found_full;
             }
 
             GetPointersForMatches(remaining_count, remaining_sel, state, found_count, found_buffer);
@@ -357,9 +384,12 @@ namespace duckdb {
         }
         uint8_t compute_buffer[GROUP_SIZE];
 
+        uint8_t found_idx_flat[STANDARD_VECTOR_SIZE];
+        uint8_t found_bool_flat[STANDARD_VECTOR_SIZE];
+
         idx_t GetKeysToCompare(const idx_t remaining_count, const SelectionVector &remaining_sel,
                                ProbeState &state) override {
-            return GetKeysToCompareInternal(remaining_count, remaining_sel, state, compute_buffer, ht_1);
+            return GetKeysToCompareInternal(remaining_count, remaining_sel, state, found_idx_flat, found_bool_flat);
         }
 
         idx_t CompareKeys(const Vector &keys_v, ProbeState &state, const idx_t key_comp_count) const override {

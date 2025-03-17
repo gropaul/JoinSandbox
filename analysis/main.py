@@ -26,6 +26,10 @@ def main():
             print("HTType mismatch")
             continue
 
+        # skip if one of the probing times is 0
+        if compressed['Probing'] == 0 or partitioned['Probing'] == 0:
+            continue
+
         # calculate the speedup
         speedup = partitioned['Probing'] / compressed['Probing']
         speedups.append(speedup)

@@ -18,8 +18,10 @@ typedef uint64_t ht_slot_t;
 namespace duckdb {
     struct ProbeState {
         Vector offsets_v;
+        Vector ht_intermediates_v;
         Vector salts_v;
         Vector salts_small_v;
+        Vector salts_small_dense_v;
         Vector found_row_pointers_v;
 
         // used for bulk key comparison
@@ -34,7 +36,7 @@ namespace duckdb {
         SelectionVector key_equal_sel;
         SelectionVector key_comp_sel;
 
-        explicit ProbeState(): offsets_v(LogicalType::HASH), salts_v(LogicalType::HASH), salts_small_v(LogicalType::HASH), found_row_pointers_v(LogicalType::POINTER),
+        explicit ProbeState(): offsets_v(LogicalType::HASH), ht_intermediates_v(LogicalType::HASH), salts_v(LogicalType::HASH), salts_small_v(LogicalType::HASH), salts_small_dense_v(LogicalType::HASH), found_row_pointers_v(LogicalType::POINTER),
                                rhs_row_pointers_v(LogicalType::POINTER), found_count(0),
                                found_sel(STANDARD_VECTOR_SIZE), remaining_sel(STANDARD_VECTOR_SIZE),
                                key_equal_sel(STANDARD_VECTOR_SIZE),

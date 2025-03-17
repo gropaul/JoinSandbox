@@ -35,6 +35,16 @@ struct JoinAnalysisResult {
     uint64_t time_probing;
     uint64_t time_total;
 
+    void Print() const {
+        std::cout << "HTType=" << HTTypeToString(ht_type) << " PartitionBits=" << n_partition_bits << " BuildCardinality="
+                  << cardinality_build << " ProbeCardinality=" << cardinality_probe << " ResultCardinality="
+                  << cardinality_result << " Capacity=" << capacity << " BuildCollisionRate=" << build_collision_rate
+                  << " ProbeCollisionRateKey=" << probe_collision_rate_key << " ProbeCollisionRateSalt="
+                  << probe_collision_rate_salt << " Partitioning=" << time_partitioning << " Inserting=" << time_inserting
+                  << " PostProcessing=" << time_post_processing << " Probing=" << time_probing << " Total=" << time_total
+                  << '\n';
+    }
+
     string GetCSVRow() const {
         return HTTypeToString(ht_type) + "," +
                std::to_string(n_partition_bits) + "," +
@@ -215,6 +225,10 @@ int main() {
                         std::cout << "Experiment " << current_experiment << " out of " << total_experiments <<
                                 " completed\n";
                         current_experiment++;
+
+                        result.Print();
+
+
                     }
                 }
             }
