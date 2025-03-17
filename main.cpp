@@ -1,4 +1,5 @@
 #include <fstream>
+#include <iomanip>
 
 #include "duckdb.hpp"
 #include "materialization/row_layout.hpp"
