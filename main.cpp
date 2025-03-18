@@ -53,6 +53,10 @@ struct JoinAnalysisResult {
                std::to_string(time_total) + "\n";
     }
 
+    void Print() const {
+        std::cout << "HTType=" << HTTypeToString(ht_type) << " PartitionBits=" << n_partition_bits << " CardinalityBuild=" << cardinality_build << " CardinalityProbe=" << cardinality_probe << " CardinalityResult=" << cardinality_result << " Capacity=" << capacity << " BuildCollisionRate=" << build_collision_rate << " ProbeCollisionRateKey=" << probe_collision_rate_key << " ProbeCollisionRateSalt=" << probe_collision_rate_salt << " Partitioning=" << time_partitioning << " Inserting=" << time_inserting << " PostProcessing=" << time_post_processing << " Probing=" << time_probing << " Total=" << time_total << '\n';
+    }
+
     static string GetCSVHeader() {
         return
                 "HTType,PartitionBits,CardinalityBuild,CardinalityProbe,CardinalityResult,Capacity,BuildCollisionRate,ProbeCollisionRateKey,ProbeCollisionRateSalt,Partitioning,Inserting,PostProcessing,Probing,Total\n";
@@ -184,6 +188,8 @@ constexpr uint64_t PARTITION_STEP_SIZE = 1;
 //                                               80000000, 90000000, 100000000};
 const vector<uint64_t> BUILD_CARDINALITIES = {100000, 300000, 1000000, 3000000, 1000000, 3000000, 10000000, 30000000, 100000000};
 const vector<uint64_t> PROBE_CARDINALITIES = {100000, 300000, 1000000, 3000000, 1000000, 3000000, 10000000, 30000000, 100000000};
+// const vector<uint64_t> PROBE_CARDINALITIES = {1000000};
+// const vector<uint64_t> BUILD_CARDINALITIES = {10};
 const vector<HashTableType> HT_TYPES = {LINEAR_PROBING_PARTITIONED_COMPRESSED, LINEAR_PROBING_PARTITIONED};
 
 int main() {
@@ -213,8 +219,8 @@ int main() {
                         const auto result = AnalyzeHT(partition_bits, ht_type, con, build_cardinality,
                                                       probe_cardinality);
                         results.push_back(result);
-                        std::cout << "Experiment " << current_experiment << " out of " << total_experiments <<
-                                " completed\n";
+                        std::cout << "Experiment " << current_experiment << ": ";
+                        result.Print();
                         current_experiment++;
                     }
                 }

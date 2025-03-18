@@ -6,7 +6,7 @@ option(NATIVE_ARCH "Compile targeting the native architecture" TRUE)
 set(CMAKE_CXX_STANDARD 11)
 
 if(NATIVE_ARCH)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native -fopenmp-simd -ftree-vectorize")
 endif()
 
 # Enable fetching the submodule if not initialized

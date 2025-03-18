@@ -221,7 +221,13 @@ namespace duckdb {
                     salt = 1;
                 }
                 salts_small[i] = salt;
-                hashes[i] = hashes[i] >> capacity_bit_shift;
+                const uint64_t offset = hashes[i] >> capacity_bit_shift;
+                const uint64_t group_offset = offset & ~(GROUP_SIZE - 1);
+
+                D_ASSERT(offset - group_offset < GROUP_SIZE);
+                D_ASSERT(group_offset <= offset);
+
+                hashes[i] = group_offset; // get the group index -> zero last bits
             }
         }
 
@@ -229,6 +235,7 @@ namespace duckdb {
             if (!value_in) {
                 return 64;
             }
+            return  __builtin_ctzll(value_in);
             uint64_t value = value_in;
 
             constexpr uint64_t index64lsb[] = {63, 0,  58, 1,  59, 47, 53, 2,  60, 39, 48, 27, 54, 33, 42, 3,
@@ -256,7 +263,7 @@ namespace duckdb {
                 return Trailing(*lower) / 8;
             }
             if (*upper) {
-                return Trailing(*upper) / 8;
+                return Trailing(*upper) / 8 + 8;
             }
 
             return -1;
@@ -277,14 +284,20 @@ namespace duckdb {
             for (idx_t idx = 0; idx < remaining_count; idx++) {
                 const idx_t sel_idx = remaining_sel.get_index(idx); // getting rid of the sel_idx was promising
                 const uint8_t salt_8 = salts[sel_idx];
-                const uint64_t ht_offset = offsets[sel_idx];
+                const uint64_t group_offset = offsets[sel_idx];
 
-                idx_t found_idx = ProbeGroup(salt_8, ht_1, ht_offset, compute_buffer);
+                const idx_t found_idx = ProbeGroup(salt_8, ht_1, group_offset, compute_buffer);
 
-                const bool full = ht_l[ht_offset + found_idx] != 0;
+                const bool full = ht_l[group_offset + found_idx] != 0;
                 found_buffer[found_count] = found_idx;
                 key_comp_sel.set_index(found_count, sel_idx);
                 found_count += full;
+                //
+                // if (!full) {
+                //     std::cout << "Found empty slot at " << group_offset + found_idx << '\n';
+                // } else {
+                //     std::cout << "Found filled slot at " << group_offset + found_idx << '\n';
+                // }
             }
 
             GetPointersForMatches(remaining_count, remaining_sel, state, found_count, found_buffer);
@@ -336,17 +349,12 @@ namespace duckdb {
             for (idx_t idx = 0; idx < found_count; idx++) {
                 const auto sel_idx = state.key_comp_sel.get_index(idx);
 
-                const uint64_t found_idx = static_cast<uint64_t>(found_buffer[idx]);
+                const auto found_idx = static_cast<uint64_t>(found_buffer[idx]);
                 const auto ht_offset = offsets[sel_idx] + found_idx;
-
                 const auto group_idx = ht_offset / GROUP_SIZE;
-                const auto group_offset = group_idx * GROUP_SIZE;
-
-                const auto max_offset_within_group = ht_offset - group_offset;
-                const auto chains_in_group = GetFullValuesFromGroupSlow(ht_1, group_offset, max_offset_within_group);
 
                 const auto key_base_offset = Constants::ReadValueAtOffset(ht_2, group_idx);
-                const auto key_actual_offset = key_base_offset + chains_in_group;
+                const auto key_actual_offset = key_base_offset + found_idx;
 
                 rhs_ptrs[sel_idx] = continuous_start + key_actual_offset * continuous_row_width;
 
@@ -403,40 +411,40 @@ namespace duckdb {
             using Constants = CompressedConstants<BYTES_PER_SLOT>;
 
             data_ptr_t continuous_start = continuous_partition->data;
-
             uint64_t stored_values_count = 0;
 
-            for (idx_t ht_offset = 0; ht_offset < capacity; ht_offset += 1) {
-                const data_ptr_t from = cast_uint64_to_pointer(ht[ht_offset] & 0x0000FFFFFFFFFFFF);
-                const data_ptr_t to = continuous_start + stored_values_count * continuous_row_width;
 
-                D_ASSERT(stored_values_count <= layout.row_count);
-                copy_tasks[stored_values_count] = {from, to};
+            const uint64_t n_groups = capacity / GROUP_SIZE;
+            for (idx_t group_idx = 0; group_idx < n_groups; group_idx++) {
 
-                // get the salt and store it in the ht_1
-                uint8_t salt = ht[ht_offset] >> (8 - sizeof(uint8_t)) * 8;
+                const idx_t group_offset = group_idx * GROUP_SIZE;
+                Constants::WriteValueAtOffset(ht_2, group_idx, stored_values_count);
 
-                const bool is_full = ht[ht_offset] != 0;
-                if (salt == 0 && is_full) {
-                    salt = 1;
+                idx_t n_values_in_group = 0;
+                idx_t full_indices[GROUP_SIZE];
+                for (idx_t i = 0; i < GROUP_SIZE; i++) {
+                    const idx_t ht_offset = group_offset + i;
+                    const bool is_full = ht[ht_offset] != 0;
+                    full_indices[n_values_in_group] = i;
+                    n_values_in_group += is_full;
                 }
 
-                ht_1[ht_offset] = salt; // never allow 0, this is the empty slot, if empty store 0!
+                for (idx_t i = 0; i < n_values_in_group; i++) {
 
-                // write to ht_2 if element_idx is divisible by GROUP_SIZE
-                if (ht_offset % GROUP_SIZE == 0) {
-                    Constants::WriteValueAtOffset(ht_2, ht_offset / GROUP_SIZE, stored_values_count);
-                    // std::cout << "Group=" << ht_offset / GROUP_SIZE << "->" << stored_values_count << '\n';
+                    const idx_t ht_offset = group_offset + full_indices[i];
+                    const idx_t value_index = stored_values_count + i;
+                    data_ptr_t from = cast_uint64_to_pointer(ht[ht_offset] & 0x0000FFFFFFFFFFFF);
+                    data_ptr_t to = continuous_start + value_index * continuous_row_width;
+
+                    D_ASSERT(from != nullptr); // must not be null as this is a full slot
+                    D_ASSERT(stored_values_count <= layout.row_count);
+                    copy_tasks[value_index] = {from, to};
+                    const uint8_t salt_raw = ht[ht_offset] >> (8 - sizeof(uint8_t)) * 8;
+                    const uint8_t salt = salt_raw == 0 ? 1 : salt_raw;
+                    D_ASSERT(salt != 0);
+                    ht_1[group_offset + i] = salt; // never allow 0, this is the empty slot, if empty store 0!
                 }
-
-
-                if (is_full) {
-                    const uint64_t key = Load<uint64_t>(from);
-                    // std::cout << "Continuous=" << stored_values_count << "->" << key << " (HTOffset=" << ht_offset << ")\n";
-                }
-
-
-                stored_values_count += is_full;
+                stored_values_count += n_values_in_group;
             }
 
             D_ASSERT(stored_values_count == layout.row_count);
