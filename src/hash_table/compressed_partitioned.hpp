@@ -63,6 +63,10 @@ namespace duckdb {
 
         static inline uint64_t ReadValueAtOffset(data_ptr_t start_pointer, const uint64_t offset) {
             const uint64_t byte_offset = GetCompressedOffset(offset);
+            ReadValueAtByteOffset(start_pointer, byte_offset);
+        }
+
+        static inline uint64_t ReadValueAtByteOffset(data_ptr_t start_pointer, const uint64_t byte_offset) {
             data_ptr_t ptr = start_pointer + byte_offset;
             const auto raw_value = ReadRawValueAtPointer(ptr);
             const uint64_t value = (raw_value & SLOT_MASK);
@@ -70,7 +74,12 @@ namespace duckdb {
         }
 
         static inline void WriteValueAtOffset(data_ptr_t start_pointer, const uint64_t offset, const uint64_t value) {
-            uint64_t byte_offset = GetCompressedOffset(offset);
+            const uint64_t byte_offset = GetCompressedOffset(offset);
+            WriteValueAtByteOffset(start_pointer, byte_offset, value);
+        }
+
+        static inline void WriteValueAtByteOffset(data_ptr_t start_pointer, const uint64_t byte_offset,
+                                                       const uint64_t value) {
             data_ptr_t ptr = start_pointer + byte_offset;
             const auto current_value = ReadRawValueAtPointer(ptr);
 
@@ -151,9 +160,9 @@ namespace duckdb {
         unique_ptr<RowLayoutPartition> continuous_partition;
         uint64_t bytes_per_slot;
 
+        uint64_t ht_compressed_group_width;
         data_ptr_t ht_allocation_compressed;
-        uint8_t *ht_1;
-        uint8_t *ht_2;
+        uint8_t *ht_compressed;
 
         vector<compressed_vector_equality_function_t> compressed_vector_eq_functions;
         vector<uint8_t> compressed_value_widths;
@@ -222,10 +231,9 @@ namespace duckdb {
                 }
                 salts_small[i] = salt;
                 const uint64_t offset = hashes[i] >> capacity_bit_shift;
-                const uint64_t group_offset = offset & ~(GROUP_SIZE - 1);
-
-                D_ASSERT(offset - group_offset < GROUP_SIZE);
-                D_ASSERT(group_offset <= offset);
+                const uint64_t group_idx = offset / GROUP_SIZE;
+                const uint64_t group_offset = group_idx * ht_compressed_group_width;
+                D_ASSERT(group_offset % ht_compressed_group_width == 0);
 
                 hashes[i] = group_offset; // get the group index -> zero last bits
             }
@@ -249,11 +257,11 @@ namespace duckdb {
         }
 
         uint64_t ProbeGroup(const uint8_t salt, const uint8_t * __restrict ht_1, const uint64_t start_offset,
-                                   uint8_t * __restrict buffer) {
+                                   uint8_t * __restrict buffer, const uint8_t * __restrict mask) {
 
             #pragma clang loop unroll(disable)
             for (int i = 0; i < GROUP_SIZE; i++) {
-                buffer[i] = (ht_1[start_offset + i] == salt | ht_1[start_offset + i] == 0) ? 0xFF : 0;
+                buffer[i] = ((ht_1[start_offset + i] & mask[i]) == salt | ht_1[start_offset + i] == 0)  ? 0xFF : 0;
             }
 
             const auto lower = reinterpret_cast<uint64_t *>(&buffer[0]);
@@ -284,19 +292,22 @@ namespace duckdb {
             for (idx_t idx = 0; idx < remaining_count; idx++) {
                 const idx_t sel_idx = remaining_sel.get_index(idx); // getting rid of the sel_idx was promising
                 const uint8_t salt_8 = salts[sel_idx];
-                const uint64_t group_offset = offsets[sel_idx];
+                uint64_t &ht_offset = offsets[sel_idx];
+                const uint64_t group_idx = ht_offset / ht_compressed_group_width;
+                const uint64_t group_offset = group_idx * ht_compressed_group_width;
 
-                const idx_t found_idx = ProbeGroup(salt_8, ht_1, group_offset, compute_buffer);
+                const uint64_t internal_group_offset = ht_offset - group_offset;
+                const uint8_t* mask = &ht_offset_masks[internal_group_offset * GROUP_SIZE];
+
+                const idx_t found_idx = ProbeGroup(salt_8, ht_compressed, group_offset, compute_buffer, mask);
 
                 const bool full = ht_l[group_offset + found_idx] != 0;
                 found_buffer[found_count] = found_idx;
                 key_comp_sel.set_index(found_count, sel_idx);
                 found_count += full;
                 //
-                // if (!full) {
+                // if (internal_group_offset) {
                 //     std::cout << "Found empty slot at " << group_offset + found_idx << '\n';
-                // } else {
-                //     std::cout << "Found filled slot at " << group_offset + found_idx << '\n';
                 // }
             }
 
@@ -350,13 +361,21 @@ namespace duckdb {
                 const auto sel_idx = state.key_comp_sel.get_index(idx);
 
                 const auto found_idx = static_cast<uint64_t>(found_buffer[idx]);
-                const auto ht_offset = offsets[sel_idx] + found_idx;
-                const auto group_idx = ht_offset / GROUP_SIZE;
+                uint64_t &ht_offset = offsets[sel_idx];
+                const uint64_t group_idx = ht_offset / ht_compressed_group_width;
+                const uint64_t group_offset = group_idx * ht_compressed_group_width;
 
-                const auto key_base_offset = Constants::ReadValueAtOffset(ht_2, group_idx);
+                const auto byte_offset = group_offset + GROUP_SIZE;
+
+                const auto key_base_offset = Constants::ReadValueAtByteOffset(ht_compressed, byte_offset);
                 const auto key_actual_offset = key_base_offset + found_idx;
 
-                rhs_ptrs[sel_idx] = continuous_start + key_actual_offset * continuous_row_width;
+                // todo: this is a hack and should be only be done if the key misses!
+                ht_offset = (ht_offset + (found_idx)) & capacity_mask;
+
+                D_ASSERT(key_actual_offset < continuous_partition->row_count);
+                data_ptr_t rhs_row_ptr = continuous_start + key_actual_offset * continuous_row_width;
+                rhs_ptrs[sel_idx] = rhs_row_ptr;
 
                 // std::cout << "Key=" << sel_idx << " BaseOffset=" << key_base_offset << " ActualOffset=" << key_actual_offset << '\n';
             }
@@ -365,7 +384,7 @@ namespace duckdb {
 
         idx_t GetKeysToCompare(const idx_t remaining_count, const SelectionVector &remaining_sel,
                                ProbeState &state) override {
-            return GetKeysToCompareInternal(remaining_count, remaining_sel, state, compute_buffer, ht_1);
+            return GetKeysToCompareInternal(remaining_count, remaining_sel, state, compute_buffer, ht_compressed);
         }
 
         idx_t CompareKeys(const Vector &keys_v, ProbeState &state, const idx_t key_comp_count) const override {
@@ -398,32 +417,55 @@ namespace duckdb {
             data_ptr_t to;
         };
 
+        uint8_t ht_offset_masks[GROUP_SIZE * GROUP_SIZE] = {0};
+
         template<idx_t BYTES_PER_SLOT>
         data_ptr_t CreateTasksAndFillHTs(const RowLayout &layout, const idx_t capacity,
-                                         const idx_t next_pointer_offset) const {
+                                         const idx_t next_pointer_offset) {
+
             // in the last iteration, there could be that we have already the whole ht values through but there are
             // trailing empty slots which would cause a buffer overflow
             data_ptr_t copy_tasks_ptr = memory_manager.allocate((layout.row_count + 1) * sizeof(CopyTask));
-
-
             auto *copy_tasks = reinterpret_cast<CopyTask *>(copy_tasks_ptr);
 
             using Constants = CompressedConstants<BYTES_PER_SLOT>;
-
             data_ptr_t continuous_start = continuous_partition->data;
             uint64_t stored_values_count = 0;
 
+            // *** ALLOCATE THE NEW COMPRESSED HT ***
 
-            const uint64_t n_groups = capacity / GROUP_SIZE;
+            // one additional group at the end that is the same as the first group
+            constexpr size_t salt_width = GROUP_SIZE * sizeof(uint8_t);
+            ht_compressed_group_width = salt_width + BYTES_PER_SLOT;
+            const idx_t n_groups = capacity / GROUP_SIZE;
+
+            const uint64_t ht_compressed_size = ht_compressed_group_width * n_groups + sizeof(uint64_t); // for accessing the last group
+            ht_allocation_compressed = memory_manager.allocate(ht_compressed_size);
+            memset(ht_allocation_compressed, 0, ht_compressed_size);
+
+            ht_compressed = ht_allocation_compressed;
+
+            // *** INITIALIZE THE ht_offset_masks **
+            for (idx_t i = 0; i < GROUP_SIZE; i++) {
+                for (idx_t j = 0; j < GROUP_SIZE; j++) {
+                    idx_t offset = i * GROUP_SIZE + j;
+                    ht_offset_masks[offset] = i <= j ? 0xFF : 0x00;
+                }
+            }
+
             for (idx_t group_idx = 0; group_idx < n_groups; group_idx++) {
 
-                const idx_t group_offset = group_idx * GROUP_SIZE;
-                Constants::WriteValueAtOffset(ht_2, group_idx, stored_values_count);
+                const idx_t group_offset_compressed = group_idx * ht_compressed_group_width;
+                const idx_t group_offset_flat = group_idx * GROUP_SIZE;
+
+
+                const idx_t key_location_offset = group_offset_compressed + salt_width;
+                Constants::WriteValueAtByteOffset(ht_compressed, key_location_offset, stored_values_count);
 
                 idx_t n_values_in_group = 0;
                 idx_t full_indices[GROUP_SIZE];
                 for (idx_t i = 0; i < GROUP_SIZE; i++) {
-                    const idx_t ht_offset = group_offset + i;
+                    const idx_t ht_offset = group_offset_flat + i;
                     const bool is_full = ht[ht_offset] != 0;
                     full_indices[n_values_in_group] = i;
                     n_values_in_group += is_full;
@@ -431,18 +473,18 @@ namespace duckdb {
 
                 for (idx_t i = 0; i < n_values_in_group; i++) {
 
-                    const idx_t ht_offset = group_offset + full_indices[i];
+                    const idx_t ht_offset_flat = group_offset_flat + full_indices[i];
                     const idx_t value_index = stored_values_count + i;
-                    data_ptr_t from = cast_uint64_to_pointer(ht[ht_offset] & 0x0000FFFFFFFFFFFF);
+                    data_ptr_t from = cast_uint64_to_pointer(ht[ht_offset_flat] & 0x0000FFFFFFFFFFFF);
                     data_ptr_t to = continuous_start + value_index * continuous_row_width;
 
                     D_ASSERT(from != nullptr); // must not be null as this is a full slot
                     D_ASSERT(stored_values_count <= layout.row_count);
                     copy_tasks[value_index] = {from, to};
-                    const uint8_t salt_raw = ht[ht_offset] >> (8 - sizeof(uint8_t)) * 8;
+                    const uint8_t salt_raw = ht[ht_offset_flat] >> (8 - sizeof(uint8_t)) * 8;
                     const uint8_t salt = salt_raw == 0 ? 1 : salt_raw;
                     D_ASSERT(salt != 0);
-                    ht_1[group_offset + i] = salt; // never allow 0, this is the empty slot, if empty store 0!
+                    ht_compressed[group_offset_compressed + i] = salt; // never allow 0, this is the empty slot, if empty store 0!
                 }
                 stored_values_count += n_values_in_group;
             }
@@ -497,19 +539,6 @@ namespace duckdb {
 
         template<idx_t BYTES_PER_SLOT>
         void PostProcessBuildIternal(RowLayout &layout, uint8_t partition_bits) {
-            // *** ALLOCATE THE NEW COMPRESSED HT ***
-
-            // one additional group at the end that is the same as the first group
-            const uint64_t salt_region_size = capacity * sizeof(uint8_t) + GROUP_SIZE;
-            const uint64_t offset_region_size = (capacity / GROUP_SIZE) * BYTES_PER_SLOT + sizeof(uint8_t);
-
-            // offset if accessing the last elements
-            const uint64_t ht_compressed_size = salt_region_size + offset_region_size;
-            ht_allocation_compressed = memory_manager.allocate(ht_compressed_size);
-            memset(ht_allocation_compressed, 0, salt_region_size);
-
-            ht_1 = ht_allocation_compressed;
-            ht_2 = ht_allocation_compressed + salt_region_size;
 
             // *** INITIALIZE THE CONTINUOUS LAYOUT ***
 
@@ -533,6 +562,7 @@ namespace duckdb {
                                                                  layout.equality_functions,
                                                                  layout.format,
                                                                  memory_manager, continuous_size);
+            continuous_partition->SetRowCount(layout.row_count);
 
             // *** CREATE COPY TASKS AND FILL THE HTS ***
 
@@ -547,11 +577,6 @@ namespace duckdb {
 
             memory_manager.deallocate(ht_allocation);
             memory_manager.deallocate(copy_tasks_ptr);
-
-            // fill the last group with the first group
-            for (idx_t i = 0; i < GROUP_SIZE; i++) {
-                ht_1[capacity + i] = ht_1[i];
-            }
         }
 
 

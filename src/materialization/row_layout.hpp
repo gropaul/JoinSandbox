@@ -147,6 +147,10 @@ namespace duckdb {
                 target.Print(row_count);
             }
         }
+
+        void SetRowCount(const idx_t row_count) {
+            this->row_count = row_count;
+        }
     };
 
     class RowLayoutPartitionIterator {

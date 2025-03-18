@@ -268,8 +268,6 @@ namespace duckdb {
             idx_t &found_count = state.found_count;
             found_count = 0;
 
-            auto &key_comp_sel = state.key_comp_sel;
-
             while (remaining_count != 0) {
 
                 const idx_t key_comp_count = GetKeysToCompare(remaining_count, state.remaining_sel, state);
