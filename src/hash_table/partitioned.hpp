@@ -285,15 +285,15 @@ namespace duckdb {
                 }
 
                 // add the unequal keys to the key_comp_sel, increment their ht_offset
-                const idx_t unequal_count = key_comp_count - equality_count;
-                for (idx_t i = 0; i < unequal_count; i++) {
-                    const auto sel_idx = state.remaining_sel.get_index(i);
-                    auto &ht_offset = offsets[sel_idx];
-                    ht_offset = (ht_offset + 1) & capacity_mask;
-                    collisions_probe_key ++;
-                }
+                // const idx_t unequal_count = key_comp_count - equality_count;
+                // for (idx_t i = 0; i < unequal_count; i++) {
+                //     const auto sel_idx = state.remaining_sel.get_index(i);
+                //     auto &ht_offset = offsets[sel_idx];
+                //     ht_offset = (ht_offset + 1) & capacity_mask;
+                //     collisions_probe_key ++;
+                // }
 
-                remaining_count = unequal_count;
+                remaining_count = 0;
             }
 
 

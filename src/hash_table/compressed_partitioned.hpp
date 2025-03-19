@@ -52,7 +52,7 @@ namespace duckdb {
             }
         }
 
-        static inline constexpr uint64_t ReadRawValueAtPointer(data_ptr_t ptr) {
+        static inline constexpr uint64_t ReadRawValueAtPointer(data_ptr_t __restrict ptr) {
             return *reinterpret_cast<uint64_t *>(ptr);
         }
 
@@ -66,7 +66,7 @@ namespace duckdb {
             ReadValueAtByteOffset(start_pointer, byte_offset);
         }
 
-        static inline uint64_t ReadValueAtByteOffset(data_ptr_t start_pointer, const uint64_t byte_offset) {
+        static inline uint64_t ReadValueAtByteOffset(data_ptr_t __restrict start_pointer, const uint64_t byte_offset) {
             data_ptr_t ptr = start_pointer + byte_offset;
             const auto raw_value = ReadRawValueAtPointer(ptr);
             const uint64_t value = (raw_value & SLOT_MASK);
@@ -257,134 +257,107 @@ namespace duckdb {
         }
 
         uint64_t ProbeGroup(const uint8_t salt, const uint8_t * __restrict ht_1, const uint64_t start_offset,
-                                   uint8_t * __restrict buffer, const uint8_t * __restrict mask) {
+                                   uint8_t * __restrict buffer) {
 
             #pragma clang loop unroll(disable)
             for (int i = 0; i < GROUP_SIZE; i++) {
-                buffer[i] = ((ht_1[start_offset + i] & mask[i]) == salt | ht_1[start_offset + i] == 0)  ? 0xFF : 0;
+                buffer[i] = ((ht_1[start_offset + i]) == salt)  ? 0xFF : 0;
             }
 
             const auto lower = reinterpret_cast<uint64_t *>(&buffer[0]);
             const auto upper = reinterpret_cast<uint64_t *>(&buffer[8]);
 
-            if (DUCKDB_LIKELY(*lower)) {
+            if (*lower) {
                 return Trailing(*lower) / 8;
             }
             if (*upper) {
                 return Trailing(*upper) / 8 + 8;
             }
 
-            return -1;
+            return 16;
         }
 
         uint8_t found_buffer[STANDARD_VECTOR_SIZE];
 
-        idx_t __attribute__((noinline)) GetKeysToCompareInternal(const idx_t remaining_count, const SelectionVector &remaining_sel,
-                                       ProbeState &state, uint8_t * __restrict compute_buffer, const uint8_t * __restrict ht_l) {
+
+        template<idx_t BYTES_PER_SLOT>
+        idx_t GetKeysToCompareInternal(const idx_t remaining_count, const SelectionVector &remaining_sel,
+                                       ProbeState &state, uint8_t * __restrict compute_buffer, uint8_t * __restrict ht_l) {
 
             const auto offsets = FlatVector::GetData<uint64_t>(state.offsets_v);
             const auto salts = FlatVector::GetData<uint8_t>(state.salts_small_v);
+            const auto rhs_ptrs = FlatVector::GetData<data_ptr_t>(state.rhs_row_pointers_v);
+            data_ptr_t continuous_start = continuous_partition->data;
 
             auto &key_comp_sel = state.key_comp_sel;
-            idx_t found_count = 0;
+
+            using Constants = CompressedConstants<BYTES_PER_SLOT>;
 
             // find empty or filled slots, add filled slots to the key_comp_sel
             for (idx_t idx = 0; idx < remaining_count; idx++) {
-                const idx_t sel_idx = remaining_sel.get_index(idx); // getting rid of the sel_idx was promising
-                const uint8_t salt_8 = salts[sel_idx];
-                uint64_t &ht_offset = offsets[sel_idx];
-                const uint64_t group_idx = ht_offset / ht_compressed_group_width;
-                const uint64_t group_offset = group_idx * ht_compressed_group_width;
+                // const idx_t sel_idx = remaining_sel.get_index(idx); // getting rid of the sel_idx was promising
+                const uint8_t salt_8 = salts[idx];
+                const uint64_t group_offset = offsets[idx];
+                // const uint64_t group_idx = ht_offset / ht_compressed_group_width;
+                // const uint64_t group_offset = group_idx * ht_compressed_group_width;
+                //
+                // const uint64_t internal_group_offset = ht_offset - group_offset;
+                // const uint8_t* mask = &ht_offset_masks[internal_group_offset * GROUP_SIZE];
 
-                const uint64_t internal_group_offset = ht_offset - group_offset;
-                const uint8_t* mask = &ht_offset_masks[internal_group_offset * GROUP_SIZE];
+                const idx_t found_idx = ProbeGroup(salt_8, ht_l, group_offset, compute_buffer);
+                found_buffer[idx] = found_idx;
 
-                const idx_t found_idx = ProbeGroup(salt_8, ht_compressed, group_offset, compute_buffer, mask);
+                const uint64_t byte_offset = group_offset + GROUP_SIZE;
+                data_ptr_t ptr = ht_l + byte_offset;
+                const auto raw_value = *reinterpret_cast<uint64_t *>(ptr);
+                const uint64_t key_base_offset = (raw_value & Constants::SLOT_MASK);
+                const auto key_actual_offset = key_base_offset + found_idx;
 
-                const bool full = ht_l[group_offset + found_idx] != 0;
-                found_buffer[found_count] = found_idx;
-                key_comp_sel.set_index(found_count, sel_idx);
-                found_count += full;
+                // todo: this is a hack and should be only be done if the key misses!
+                // ht_offset = (ht_offset + (found_idx)) & capacity_mask;
+
+                D_ASSERT(key_actual_offset < continuous_partition->row_count);
+                data_ptr_t rhs_row_ptr = continuous_start + key_actual_offset * continuous_row_width;
+                rhs_ptrs[idx] = rhs_row_ptr;
                 //
                 // if (internal_group_offset) {
                 //     std::cout << "Found empty slot at " << group_offset + found_idx << '\n';
                 // }
             }
 
-            GetPointersForMatches(remaining_count, remaining_sel, state, found_count, found_buffer);
+            idx_t found_count = 0;
+            for (idx_t idx = 0; idx < remaining_count; idx++) {
+                const idx_t found = found_buffer[idx] != 16;
+                key_comp_sel[found_count] = idx
+                found_count += found;
+            }
+
+
             return found_count;
         }
 
-        void __attribute__((noinline)) GetPointersForMatches(const idx_t remaining_count, const SelectionVector &remaining_sel,
-                                   ProbeState &state, const idx_t found_count, const uint8_t *found_buffer) {
-            switch (bytes_per_slot) {
-                case 1:
-                    GetPointersForMatchesInternal<1>(remaining_count, remaining_sel, state, found_count, found_buffer);
-                    break;
-                case 2:
-                    GetPointersForMatchesInternal<2>(remaining_count, remaining_sel, state, found_count, found_buffer);
-                    break;
-                case 3:
-                    GetPointersForMatchesInternal<3>(remaining_count, remaining_sel, state, found_count, found_buffer);
-                    break;
-                case 4:
-                    GetPointersForMatchesInternal<4>(remaining_count, remaining_sel, state, found_count, found_buffer);
-                    break;
-                case 5:
-                    GetPointersForMatchesInternal<5>(remaining_count, remaining_sel, state, found_count, found_buffer);
-                    break;
-                case 6:
-                    GetPointersForMatchesInternal<6>(remaining_count, remaining_sel, state, found_count, found_buffer);
-                    break;
-                case 7:
-                    GetPointersForMatchesInternal<7>(remaining_count, remaining_sel, state, found_count, found_buffer);
-                    break;
-                default:
-                    throw std::runtime_error("Unsupported bytes per value: " + std::to_string(bytes_per_slot));
-            }
-        }
-
-        template<idx_t BYTES_PER_SLOT>
-        void GetPointersForMatchesInternal(const idx_t remaining_count, const SelectionVector &remaining_sel,
-                                           ProbeState &state, const idx_t found_count, const uint8_t *found_buffer) {
-            const auto rhs_ptrs = FlatVector::GetData<data_ptr_t>(state.rhs_row_pointers_v);
-            const auto offsets = FlatVector::GetData<uint64_t>(state.offsets_v);
-
-            data_ptr_t continuous_start = continuous_partition->data;
-
-            using Constants = CompressedConstants<BYTES_PER_SLOT>;
-
-            // std::cout << "GetPointersForMatchesInternal: FoundCount=" << found_count << '\n';
-
-            // find empty or filled slots, add filled slots to the key_comp_sel
-            for (idx_t idx = 0; idx < found_count; idx++) {
-                const auto sel_idx = state.key_comp_sel.get_index(idx);
-
-                const auto found_idx = static_cast<uint64_t>(found_buffer[idx]);
-                uint64_t &ht_offset = offsets[sel_idx];
-                const uint64_t group_idx = ht_offset / ht_compressed_group_width;
-                const uint64_t group_offset = group_idx * ht_compressed_group_width;
-
-                const auto byte_offset = group_offset + GROUP_SIZE;
-
-                const auto key_base_offset = Constants::ReadValueAtByteOffset(ht_compressed, byte_offset);
-                const auto key_actual_offset = key_base_offset + found_idx;
-
-                // todo: this is a hack and should be only be done if the key misses!
-                ht_offset = (ht_offset + (found_idx)) & capacity_mask;
-
-                D_ASSERT(key_actual_offset < continuous_partition->row_count);
-                data_ptr_t rhs_row_ptr = continuous_start + key_actual_offset * continuous_row_width;
-                rhs_ptrs[sel_idx] = rhs_row_ptr;
-
-                // std::cout << "Key=" << sel_idx << " BaseOffset=" << key_base_offset << " ActualOffset=" << key_actual_offset << '\n';
-            }
-        }
         uint8_t compute_buffer[GROUP_SIZE];
 
         idx_t GetKeysToCompare(const idx_t remaining_count, const SelectionVector &remaining_sel,
                                ProbeState &state) override {
-            return GetKeysToCompareInternal(remaining_count, remaining_sel, state, compute_buffer, ht_compressed);
+            switch (bytes_per_slot) {
+                case 1:
+                    return GetKeysToCompareInternal<1>(remaining_count, remaining_sel, state, compute_buffer, ht_compressed);
+                case 2:
+                    return GetKeysToCompareInternal<2>(remaining_count, remaining_sel, state, compute_buffer, ht_compressed);
+                case 3:
+                    return GetKeysToCompareInternal<3>(remaining_count, remaining_sel, state, compute_buffer, ht_compressed);
+                case 4:
+                    return GetKeysToCompareInternal<4>(remaining_count, remaining_sel, state, compute_buffer, ht_compressed);
+                case 5:
+                    return GetKeysToCompareInternal<5>(remaining_count, remaining_sel, state, compute_buffer, ht_compressed);
+                case 6:
+                    return GetKeysToCompareInternal<6>(remaining_count, remaining_sel, state, compute_buffer, ht_compressed);
+                case 7:
+                    return GetKeysToCompareInternal<7>(remaining_count, remaining_sel, state, compute_buffer, ht_compressed);
+            default:
+                    throw std::runtime_error("Unsupported bytes per value: " + std::to_string(bytes_per_slot));
+            }
         }
 
         idx_t CompareKeys(const Vector &keys_v, ProbeState &state, const idx_t key_comp_count) const override {

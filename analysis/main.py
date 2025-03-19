@@ -76,7 +76,7 @@ def main():
     # Colorbar with label
     cbar = plt.colorbar()
     cbar.set_label('Selectivity')
-    plt.ylim(0, 3)
+    plt.ylim(0, 4)
     plt.axhline(y=1, color='r', linestyle='--')
 
     # Finalize plot
@@ -146,7 +146,7 @@ def main():
     plt.xlabel('Selectivity')
     plt.ylabel('Probing Speed [Tuples per ms]')
     # set range from 0 to 3, add line at 1
-    plt.ylim(0, 3)
+    plt.ylim(0, 4)
     plt.axhline(y=1, color='r', linestyle='--')
     plt.title('Scatter plot grouped by HTType')
 
