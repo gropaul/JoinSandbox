@@ -328,7 +328,7 @@ namespace duckdb {
             idx_t found_count = 0;
             for (idx_t idx = 0; idx < remaining_count; idx++) {
                 const idx_t found = found_buffer[idx] != 16;
-                key_comp_sel[found_count] = idx
+                key_comp_sel[found_count] = idx;
                 found_count += found;
             }
 
@@ -385,10 +385,6 @@ namespace duckdb {
             return widths;
         }
 
-        struct CopyTask {
-            data_ptr_t from;
-            data_ptr_t to;
-        };
 
         uint8_t ht_offset_masks[GROUP_SIZE * GROUP_SIZE] = {0};
 
@@ -398,11 +394,10 @@ namespace duckdb {
 
             // in the last iteration, there could be that we have already the whole ht values through but there are
             // trailing empty slots which would cause a buffer overflow
-            data_ptr_t copy_tasks_ptr = memory_manager.allocate((layout.row_count + 1) * sizeof(CopyTask));
-            auto *copy_tasks = reinterpret_cast<CopyTask *>(copy_tasks_ptr);
+            data_ptr_t copy_task_sources_ptr = memory_manager.allocate((layout.row_count + 1) * sizeof(data_ptr_t));
+            auto *copy_task_sources = reinterpret_cast<data_ptr_t *>(copy_task_sources_ptr);
 
             using Constants = CompressedConstants<BYTES_PER_SLOT>;
-            data_ptr_t continuous_start = continuous_partition->data;
             uint64_t stored_values_count = 0;
 
             // *** ALLOCATE THE NEW COMPRESSED HT ***
@@ -449,11 +444,10 @@ namespace duckdb {
                     const idx_t ht_offset_flat = group_offset_flat + full_indices[i];
                     const idx_t value_index = stored_values_count + i;
                     data_ptr_t from = cast_uint64_to_pointer(ht[ht_offset_flat] & 0x0000FFFFFFFFFFFF);
-                    data_ptr_t to = continuous_start + value_index * continuous_row_width;
 
                     D_ASSERT(from != nullptr); // must not be null as this is a full slot
                     D_ASSERT(stored_values_count <= layout.row_count);
-                    copy_tasks[value_index] = {from, to};
+                    copy_task_sources[value_index] = from;
                     const uint8_t salt_raw = ht[ht_offset_flat] >> (8 - sizeof(uint8_t)) * 8;
                     const uint8_t salt = salt_raw == 0 ? 1 : salt_raw;
                     D_ASSERT(salt != 0);
@@ -464,15 +458,17 @@ namespace duckdb {
 
             D_ASSERT(stored_values_count == layout.row_count);
             // std::cout << "MaxError=" << max_error << " MinError=" << min_error << ' ';
-            return copy_tasks_ptr;
+            return copy_task_sources_ptr;
         }
 
 
         __attribute__((noinline)) void Copy(const size_t element_idx,
-                                            const CopyTask *copy_tasks,
+                                            const data_ptr_t *copy_task_sources,
+                                            data_ptr_t continuous_start, const uint64_t row_width,
                                             const vector<uint64_t> &value_offsets,
                                             const vector<uint64_t> &value_offsets_compressed) {
-            const CopyTask task = copy_tasks[element_idx];
+            data_ptr_t task_source = copy_task_sources[element_idx];
+            data_ptr_t task_destination = continuous_start + element_idx * row_width;
 
             column_t n_cols = value_offsets_compressed.size();
             for (column_t col_idx = 0; col_idx < n_cols; col_idx++) {
@@ -482,8 +478,8 @@ namespace duckdb {
                 // todo: target aligned 64bit writes because 8 bit write will trigger 64 bit read + mask + or + write
                 // todo: Do this vectorized: first fill vector of these sizes, then write them to the target ->
                 // todo: overhead of masking and shifting reduced, loop at frame of reference encoding
-                const auto value_source_ptr = task.from + value_offset;
-                const auto value_target_ptr = task.to + value_offset_compressed;
+                const auto value_source_ptr = task_source + value_offset;
+                const auto value_target_ptr = task_destination + value_offset_compressed;
 
                 // write the compressed value to the target
                 std::memcpy(value_target_ptr, value_source_ptr, compressed_width);
@@ -500,12 +496,13 @@ namespace duckdb {
             // } while (row_source_ptr != nullptr);
         }
 
-        __attribute__((noinline)) void FillContinuousLayout(const CopyTask *copy_tasks, const uint64_t elements_count,
+        __attribute__((noinline)) void FillContinuousLayout(const data_ptr_t *copy_task_sources, const uint64_t elements_count,
+                                        data_ptr_t continuous_start, const uint64_t row_width,
                                                             const vector<uint64_t> &value_offsets,
                                                             const vector<uint64_t> &value_offsets_compressed
         ) {
             for (size_t element_idx = 0; element_idx < elements_count; element_idx++) {
-                Copy(element_idx, copy_tasks, value_offsets, value_offsets_compressed);
+                Copy(element_idx, copy_task_sources, continuous_start, row_width, value_offsets, value_offsets_compressed);
             }
         }
 
@@ -540,16 +537,16 @@ namespace duckdb {
             // *** CREATE COPY TASKS AND FILL THE HTS ***
 
             const idx_t next_pointer_offset = layout.format.offsets[layout.format.types.size() - 1];
-            data_ptr_t copy_tasks_ptr = CreateTasksAndFillHTs<BYTES_PER_SLOT>(layout, capacity, next_pointer_offset);
-            const auto *copy_tasks = reinterpret_cast<CopyTask *>(copy_tasks_ptr);
+            data_ptr_t copy_task_sources_ptr = CreateTasksAndFillHTs<BYTES_PER_SLOT>(layout, capacity, next_pointer_offset);
+            auto *copy_task_sources = reinterpret_cast<data_ptr_t *>(copy_task_sources_ptr);
 
             // *** FILL THE CONTINUOUS LAYOUT ***
-
-            FillContinuousLayout(copy_tasks, layout.row_count, layout.format.offsets,
+            data_ptr_t continuous_start = continuous_partition->data;
+            FillContinuousLayout(copy_task_sources, layout.row_count, continuous_start, continuous_row_width, layout.format.offsets,
                                  value_offsets_compressed);
 
             memory_manager.deallocate(ht_allocation);
-            memory_manager.deallocate(copy_tasks_ptr);
+            memory_manager.deallocate(copy_task_sources_ptr);
         }
 
 

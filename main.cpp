@@ -73,11 +73,11 @@ struct JoinAnalysisResult {
 };
 
 string GetBuildSideQuery(uint64_t cardinality) {
-    return "SELECT key, FROM build_100m LIMIT " + std::to_string(cardinality) + ";";
+    return "PRAGMA disabled_optimizers='top_n';CREATE TEMP TABLE IF NOT EXISTS keys AS (SELECT CAST((range) AS uint64) as key FROM range (100_000_000) ORDER BY hash(range *13441 + 1213321)); WITH range as (SELECT * FROM keys LIMIT " + std::to_string(cardinality) + ") SELECT * FROM range ORDER BY hash(key *1312312 + 13441);";
 }
 
 string GetProbeSideQuery(uint64_t cardinality) {
-    return "PRAGMA disabled_optimizers='top_n';WITH values AS (SELECT key FROM probe_100m LIMIT " + std::to_string(cardinality) + ") SELECT * FROM values ORDER BY hash(key*13441);";
+    return "PRAGMA disabled_optimizers='top_n';CREATE TEMP TABLE IF NOT EXISTS keys AS (SELECT CAST((range) AS uint64) as key FROM range (100_000_000) ORDER BY hash(range *13441 + 1213321)); WITH range as (SELECT * FROM keys LIMIT " + std::to_string(cardinality) + ") SELECT * FROM range ORDER BY hash(key *13441 + 1312312);";
 }
 
 JoinAnalysisResult AnalyzeHT(const uint8_t partition_bits, const HashTableType ht_type, Connection &con,
@@ -190,21 +190,44 @@ constexpr uint64_t PARTITION_STEP_SIZE = 1;
 #define BENCHMARK
 
 #ifdef BENCHMARK
-const vector<uint64_t> BUILD_CARDINALITIES = {1000000, 3000000, 1000000, 3000000, 10000000, 30000000, 100000000};
-const vector<uint64_t> PROBE_CARDINALITIES = {1000000, 3000000, 1000000, 3000000, 10000000, 30000000, 100000000};
+const vector<uint64_t> BUILD_CARDINALITIES = {
+    1000000,
+    2000000,
+    3000000,
+    5000000,
+    10000000,
+    20000000,
+    30000000,
+    50000000,
+    100000000
+};
+
+const vector<uint64_t> PROBE_CARDINALITIES = {
+    1000000,
+    2000000,
+    3000000,
+    5000000,
+    10000000,
+    20000000,
+    30000000,
+    50000000,
+    100000000
+};
+
 #else
-// const vector<uint64_t> PROBE_CARDINALITIES = {100000000};
-// const vector<uint64_t> BUILD_CARDINALITIES = {100000000};
+const vector<uint64_t> PROBE_CARDINALITIES = {100000000};
+const vector<uint64_t> BUILD_CARDINALITIES = {100000000};
 #endif
 const vector<HashTableType> HT_TYPES = {
     LINEAR_PROBING_PARTITIONED_COMPRESSED,
-#ifdef BENCHMARK
     LINEAR_PROBING_PARTITIONED
+#ifdef BENCHMARK
+
 #endif
 };
 
 int main() {
-    DuckDB db("./micro.duckdb");
+    DuckDB db(nullptr);
     Connection con(db);
 
     // three runs
