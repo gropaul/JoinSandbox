@@ -329,7 +329,7 @@ namespace duckdb {
                 auto &target = result.data[payload_offset + i];
                 auto &gather_function = gather_functions[i];
                 auto offset = format->offsets[i];
-                gather_function(probe_state.found_row_pointers_v, found_sel, found_count, offset, target);
+                gather_function(probe_state.found_row_pointers_v, found_sel, found_count, offset, target, 0);
             }
 
             uint64_t advanced_count = 0;

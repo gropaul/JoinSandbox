@@ -17,6 +17,8 @@ namespace duckdb {
     // 8mb partition size
     constexpr idx_t PARTITION_SIZE = 4 * 1024 * 1024;
 
+    constexpr idx_t OUTER_LOOP_SIZE = 256;
+
     //! Returns the size of the data type in bytes
     static idx_t GetSize(const duckdb::LogicalType &type) {
         const auto size = GetTypeIdSize(type.InternalType());
@@ -113,12 +115,18 @@ namespace duckdb {
         void Sink(const DataChunk &chunk, const Vector &hashes_v, const SelectionVector &sel, const idx_t count) {
             const idx_t row_width = format.size;
 
-            for (idx_t i = 0; i < chunk.ColumnCount() + 1; i++) {
-                auto &vector = i == chunk.ColumnCount() ? hashes_v : chunk.data[i];
-                data_ptr_t target = data + current_write_offset + format.offsets[i];
-                auto &scatter_function = scatter_functions[i];
-                scatter_function(vector, sel, count, row_width, target);
+            for (idx_t outer_idx = 0; outer_idx < count; outer_idx += OUTER_LOOP_SIZE) {
+                idx_t remaining = count - outer_idx; // always non‑negative
+                idx_t inner_count = std::min<idx_t>(OUTER_LOOP_SIZE, remaining);
+
+                for (column_t col_idx = 0; col_idx < chunk.ColumnCount() + 1; col_idx++) {
+                    auto &vector = col_idx == chunk.ColumnCount() ? hashes_v : chunk.data[col_idx];
+                    data_ptr_t target = data + current_write_offset + format.offsets[col_idx];
+                    auto &scatter_function = scatter_functions[col_idx];
+                    scatter_function(vector, sel, inner_count, row_width, target, outer_idx);
+                }
             }
+
 
             const auto written_bytes = row_width * count;
             current_write_offset += written_bytes;
@@ -132,6 +140,7 @@ namespace duckdb {
         void Print() const {
             std::cerr << "Partition " << radix << " has " << row_count << " rows" << '\n';
             column_t col_count = format.types.size();
+
             for (column_t col_idx = 0; col_idx < col_count; col_idx++) {
                 std::cerr << "Column " << col_idx << ": ";
                 auto &gather_function = gather_functions[col_idx];
@@ -143,7 +152,7 @@ namespace duckdb {
                 }
 
                 gather_function(row_pointers_v, *FlatVector::IncrementalSelectionVector(), row_count,
-                                format.offsets[col_idx], target);
+                                format.offsets[col_idx], target, 0);
                 target.Print(row_count);
             }
         }
@@ -221,6 +230,7 @@ namespace duckdb {
                 if (i < types.size() - 1) {
                     min_max_ranges.push_back(Range());
                 }
+                columns.push_back(i);
             }
 
             for (idx_t radix = 0; radix < (1 << partition_bits); radix++) {
@@ -239,6 +249,7 @@ namespace duckdb {
         vector<Range> min_max_ranges;
 
         vector<column_t> key_columns;
+        vector<column_t> columns;
         RowLayoutFormat format;
         vector<vector<RowLayoutPartition> > partition_chains;
         vector<scatter_function_t> scatter_functions;
@@ -265,7 +276,7 @@ namespace duckdb {
             VectorOperations::Hash(key, hash_v, count);
 
             if (collect_min_max) {
-                for (idx_t i = 0; i <columns; i++) {
+                for (idx_t i = 0; i < columns; i++) {
                     auto &min_max = min_max_ranges[i];
                     auto &column = chunk.data[i];
                     UpdateRange(column, count, min_max);
@@ -302,7 +313,7 @@ namespace duckdb {
                 if (last_partition.CanSink(chunk)) {
                     last_partition.Sink(chunk, hash_v, partitions_copy_sel[i], partition_copy_count[i]);
                 } else {
-                    chain.emplace_back(i,  scatter_functions, gather_functions, equality_functions, format,
+                    chain.emplace_back(i, scatter_functions, gather_functions, equality_functions, format,
                                        memory_manager);
                     auto &new_partition = chain[chain.size() - 1];
                     new_partition.Sink(chunk, hash_v, partitions_copy_sel[i], partition_copy_count[i]);
@@ -318,7 +329,7 @@ namespace duckdb {
 
             const auto gather_function = gather_functions[col_idx];
             gather_function(row_pointers, *FlatVector::IncrementalSelectionVector(), count, format.offsets[col_idx],
-                            result);
+                            result, 0);
         }
 
         void Free() const {

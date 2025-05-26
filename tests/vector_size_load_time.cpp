@@ -3,6 +3,8 @@
 #include <vector>
 #include <cstring>
 
+#include "../duckdb/src/include/duckdb.h"
+
 std::string NSToString(uint64_t ns) {
     if (ns < 1000) return std::to_string(ns) + " ns";
     else if (ns < 1000000) return std::to_string(ns / 1000) + " us";
@@ -128,6 +130,9 @@ BenchmarkResult TestHashTable(const uint64_t num_elements_probe,const uint64_t n
     GetRandomVector<vector_size>(sel_vector, 0);
 
 
+    bool found[vector_size];
+    bool needs_probing[vector_size];
+
     auto init_end = std::chrono::high_resolution_clock::now();
     uint64_t init_time = std::chrono::duration_cast<std::chrono::nanoseconds>(init_end - init_start).count();
 
@@ -159,8 +164,24 @@ BenchmarkResult TestHashTable(const uint64_t num_elements_probe,const uint64_t n
                 // linearly probing
                 ht_offset = (ht_offset + 1) & mask;
             }
-
         }
+
+        // todo: idea - iterate over all the found elements in a vector, dont have the while(true) in the vector but outside.
+
+        idx_t remaining = vector_size;
+
+        while (true) {
+            for (uint64_t idx = 0; idx < remaining; idx++) {
+                const uint64_t ht_offset = probe_vector[idx] & mask;
+                const uint64_t ht_value = hash_table[ht_offset];
+                uint64_t probe_value = probe_vector[idx];
+                found[idx] = ht_value == probe_value;
+                needs_probing[idx] = ht_value != 0 && ht_value != probe_value;
+            }
+        }
+
+
+
         auto lookup_end = std::chrono::high_resolution_clock::now();
         lookup_duration_us += std::chrono::duration_cast<std::chrono::nanoseconds>(lookup_end - lookup_start).count();
 

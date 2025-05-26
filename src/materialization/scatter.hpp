@@ -12,47 +12,52 @@
 // generic function to scatter a chunk of data into a partition
 namespace duckdb {
     typedef void (*scatter_function_t)(const Vector &source, const SelectionVector &sel, const idx_t count,
-                                       const idx_t jump_offset, data_ptr_t target);
+                                       const idx_t jump_offset, data_ptr_t target, const idx_t offset);
 
     template<typename DATA_TYPE>
     void Scatter(const Vector &source, const SelectionVector &sel, const idx_t count,
-                 const idx_t jump_offset, data_ptr_t partition_data) {
+                 const idx_t jump_offset, data_ptr_t partition_data, const idx_t offset) {
         auto source_data = FlatVector::GetData<DATA_TYPE>(source);
-        for (idx_t i = 0; i < count; i++) {
-            auto source_idx = sel.get_index(i);
+
+        for (idx_t idx = 0; idx < count; idx++) {
+            const idx_t offset_idx = offset + idx;
+            auto source_idx = sel.get_index(offset_idx);
             auto source_value = source_data[source_idx];
-            Store<DATA_TYPE>(source_value, partition_data + jump_offset * i);
+            Store<DATA_TYPE>(source_value, partition_data + jump_offset * offset_idx);
         }
     }
 
     typedef void (*gather_function_t)(const Vector &row_pointers, const SelectionVector &sel, const idx_t count,
-                                  const idx_t column_offset, Vector &target);
+                                      const idx_t column_offset, Vector &target, const idx_t offset);
 
     template<typename DATA_TYPE>
     void Gather(const Vector &row_pointers_v, const SelectionVector &sel, const idx_t count,
-                const idx_t column_offset, Vector &target) {
+                const idx_t column_offset, Vector &target, const idx_t offset) {
         auto row_pointers = FlatVector::GetData<data_ptr_t>(row_pointers_v);
         auto target_data = FlatVector::GetData<DATA_TYPE>(target);
 
-        for (idx_t i = 0; i < count; i++) {
-            idx_t sel_idx = sel.get_index(i);
+        for (idx_t idx = 0; idx < count; idx++) {
+            idx_t offset_idx = offset + idx;
+            idx_t sel_idx = sel.get_index(offset_idx);
             auto row_ptr = row_pointers[sel_idx];
             auto value_ptr = row_ptr + column_offset;
             auto value = Load<DATA_TYPE>(value_ptr);
-            target_data[i] = value;
+            target_data[offset_idx] = value;
         }
     }
 
-    typedef idx_t (*vector_equality_function_t)(const Vector &left, const Vector &row_pointers, const SelectionVector &sel,
-                                    const idx_t count, const idx_t column_offset,
-                                    SelectionVector &equal, SelectionVector &un_equal);
+    typedef idx_t (*vector_equality_function_t)(const Vector &left, const Vector &row_pointers,
+                                                const SelectionVector &sel,
+                                                const idx_t count, const idx_t column_offset,
+                                                SelectionVector &equal, SelectionVector &un_equal);
 
-    template <typename DATA_TYPE>
+    template<typename DATA_TYPE>
     idx_t VectorRowEqual(const Vector &left, const Vector &row_pointers, const SelectionVector &sel,
-                const idx_t count, const idx_t column_offset, SelectionVector &equal, SelectionVector &un_equal) {
+                         const idx_t count, const idx_t column_offset, SelectionVector &equal,
+                         SelectionVector &un_equal) {
         // Obtain pointers to the actual data in 'left' and the row pointers
         auto left_data = FlatVector::GetData<DATA_TYPE>(left);
-        auto row_ptrs  = FlatVector::GetData<data_ptr_t>(row_pointers);
+        auto row_ptrs = FlatVector::GetData<data_ptr_t>(row_pointers);
 
         idx_t match_count = 0;
         for (idx_t i = 0; i < count; i++) {
@@ -60,12 +65,12 @@ namespace duckdb {
             auto source_idx = sel.get_index(i);
 
             // Address of the row data in the partition
-            auto row_ptr   = row_ptrs[source_idx];
+            auto row_ptr = row_ptrs[source_idx];
             auto value_ptr = row_ptr + column_offset;
 
             // Load the value from that row
             const auto stored_val = Load<DATA_TYPE>(value_ptr);
-            const auto lhs_val    = left_data[source_idx];
+            const auto lhs_val = left_data[source_idx];
             // Compare against the element in 'left' at source_idx
             if (lhs_val == stored_val) {
                 // Write the matching index to the result selection vector
@@ -80,17 +85,18 @@ namespace duckdb {
         return match_count;
     }
 
-    typedef idx_t (*compressed_vector_equality_function_t)(const Vector &left, const Vector &row_pointers, const SelectionVector &sel,
-                                   const idx_t count, const idx_t column_offset,
-                                   SelectionVector &equal, SelectionVector &un_equal);
+    typedef idx_t (*compressed_vector_equality_function_t)(const Vector &left, const Vector &row_pointers,
+                                                           const SelectionVector &sel,
+                                                           const idx_t count, const idx_t column_offset,
+                                                           SelectionVector &equal, SelectionVector &un_equal);
 
-    template <typename DATA_TYPE, int COMPRESSED_WIDTH>
+    template<typename DATA_TYPE, int COMPRESSED_WIDTH>
     idx_t CompressedVectorRowEqual(const Vector &left, const Vector &row_pointers, const SelectionVector &sel,
-             const idx_t count, const idx_t column_offset, SelectionVector &equal, SelectionVector &un_equal) {
-
+                                   const idx_t count, const idx_t column_offset, SelectionVector &equal,
+                                   SelectionVector &un_equal) {
         // Obtain pointers to the actual data in 'left' and the row pointers
         auto left_data = FlatVector::GetData<DATA_TYPE>(left);
-        auto row_ptrs  = FlatVector::GetData<data_ptr_t>(row_pointers);
+        auto row_ptrs = FlatVector::GetData<data_ptr_t>(row_pointers);
 
         idx_t match_count = 0;
         for (idx_t i = 0; i < count; i++) {
@@ -98,10 +104,10 @@ namespace duckdb {
             auto source_idx = sel.get_index(i);
 
             // Address of the row data in the partition
-            auto row_ptr   = row_ptrs[source_idx];
+            auto row_ptr = row_ptrs[source_idx];
             auto rhs_ptr = row_ptr + column_offset;
 
-            const auto lhs_ptr    = &left_data[source_idx];
+            const auto lhs_ptr = &left_data[source_idx];
             // Compare against the element in 'left' at source_idx, but only the compressed width of the value
             if (DUCKDB_LIKELY(memcmp(lhs_ptr, rhs_ptr, COMPRESSED_WIDTH) == 0)) {
                 // Write the matching index to the result selection vector
@@ -119,11 +125,38 @@ namespace duckdb {
 
     typedef bool (*row_equality_function_t)(data_ptr_t left, data_ptr_t right, const idx_t column_offset);
 
-    template <typename DATA_TYPE>
+    template<typename DATA_TYPE>
     bool RowRowEqual(data_ptr_t left, data_ptr_t right, const idx_t column_offset) {
-        auto left_val  = Load<DATA_TYPE>(left + column_offset);
+        auto left_val = Load<DATA_TYPE>(left + column_offset);
         auto right_val = Load<DATA_TYPE>(right + column_offset);
         return left_val == right_val;
+    }
+
+    static uint8_t GetByteSize(const LogicalType &type) {
+        switch (type.id()) {
+            case LogicalTypeId::BIGINT:
+                return sizeof(int64_t);
+            case LogicalTypeId::UBIGINT:
+                return sizeof(uint64_t);
+            case LogicalTypeId::INTEGER:
+                return sizeof(int32_t);
+            case LogicalTypeId::UINTEGER:
+                return sizeof(uint32_t);
+            case LogicalTypeId::SMALLINT:
+                return sizeof(int16_t);
+            case LogicalTypeId::USMALLINT:
+                return sizeof(uint16_t);
+            case LogicalTypeId::TINYINT:
+                return sizeof(int8_t);
+            case LogicalTypeId::UTINYINT:
+                return sizeof(uint8_t);
+            case LogicalTypeId::FLOAT:
+                return sizeof(float);
+            case LogicalTypeId::DOUBLE:
+                return sizeof(double);
+            default:
+                throw NotImplementedException("Size function not implemented for type");
+        }
     }
 
     static scatter_function_t GetScatterFunction(const LogicalType &type) {
@@ -180,7 +213,7 @@ namespace duckdb {
         }
     }
 
-    template <int COMPRESSED_WIDTH>
+    template<int COMPRESSED_WIDTH>
     static compressed_vector_equality_function_t GetCompressedEqualityFunctionA(const LogicalType &type) {
         switch (type.id()) {
             case LogicalTypeId::BIGINT:
@@ -208,8 +241,9 @@ namespace duckdb {
         }
     }
 
-    static compressed_vector_equality_function_t GetCompressedEqualityFunction(const LogicalType &type, const int compressed_width) {
-        switch (compressed_width){
+    static compressed_vector_equality_function_t GetCompressedEqualityFunction(
+        const LogicalType &type, const int compressed_width) {
+        switch (compressed_width) {
             case 1:
                 return GetCompressedEqualityFunctionA<1>(type);
             case 2:
@@ -230,7 +264,6 @@ namespace duckdb {
                 throw NotImplementedException("Equality function not implemented for type");
         }
     }
-
 
 
     static vector_equality_function_t GetEqualityFunction(const LogicalType &type) {

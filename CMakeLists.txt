@@ -25,6 +25,7 @@ include_directories(src)
 link_directories(src)
 
 add_executable(HTBench main.cpp
+        src/utils.hpp
         src/hash_table/compressed_partitioned.hpp
         src/hash_table/utils.hpp
         src/materialization/row_layout.hpp
@@ -33,5 +34,19 @@ add_executable(HTBench main.cpp
         src/materialization/memory_manager.cpp
         src/materialization/scatter.hpp)
 
+add_executable(GatherBench tests/gather_bench.cpp
+        src/utils.hpp
+        src/hash_table/compressed_partitioned.hpp
+        src/hash_table/utils.hpp
+        src/materialization/row_layout.hpp
+        src/materialization/aggregates.hpp
+        src/materialization/memory_manager.hpp
+        src/materialization/memory_manager.cpp
+        src/materialization/scatter.hpp)
+
+add_executable(ValidityBench tests/validity_bytes.cpp)
+
 # Link with DuckDB library
 target_link_libraries(HTBench duckdb)
+target_link_libraries(GatherBench duckdb)
+target_link_libraries(ValidityBench duckdb)
