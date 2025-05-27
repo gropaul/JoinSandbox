@@ -5,10 +5,10 @@
 #include "duckdb/common/sort/comparators.hpp"
 
 const uint64_t ROW_COUNT = 1000000;
-const uint64_t ROW_KEYS = 3;
-const uint64_t VECTOR_SIZE = 2048; // Standard vector size for operations
-const uint64_t N_VECTORS = 3000; // Number of vectors to test
-const uint64_t NUM_RUNS = 5; // Number of runs per strategy
+const uint64_t ROW_KEYS = 1;
+const uint64_t VECTOR_SIZE = 128; // Standard vector size for operations
+const uint64_t N_VECTORS = 1; // Number of vectors to test
+const uint64_t NUM_RUNS = 1; // Number of runs per strategy
 
 const uint64_t SEED = 42; // Seed for reproducibility
 
@@ -45,9 +45,6 @@ namespace duckdb {
         void PopulateRandom() const {
             if (!allocation) return;
 
-            // Seed random number generator for random values
-            std::srand(static_cast<unsigned int>(std::time(nullptr)));
-
             for (uint64_t i = 0; i < row_count; ++i) {
                 uint8_t *row = allocation + i * row_width;
 
@@ -72,7 +69,11 @@ namespace duckdb {
                 uint8_t *row_ptr = allocation + random_row_index * row_width;
                 // store the pointer in the provided array
                 ptrs[i] = row_ptr;
+
+                // print the ponters, byte in binary
+                std::cout << "Row " << i << ": " << static_cast<void *>(row_ptr) << " Byte: " << std::bitset<8>(row_ptr[0]) << "\n";
             }
+
         }
 
         void Free() {
@@ -132,10 +133,12 @@ namespace duckdb {
             auto __restrict *validity_mask_ptr = reinterpret_cast<uint8_t *>(mask.GetData());
 
             uint64_t flat_idx = 0;
-            for (uint64_t idx_in_block = 0; idx_in_block < BLOCK_SIZE; idx_in_block += 1) {
-                for (uint64_t row_idx = idx_in_block; row_idx < row_count; row_idx += BLOCK_SIZE) {
-                    buffer[flat_idx] = *ptrs[row_idx];
-                    flat_idx += 1;
+            for (uint64_t window_start_idx = 0; window_start_idx < row_count; window_start_idx += BLOCK_WINDOW_SIZE ) {
+                for (uint64_t idx_in_block = 0; idx_in_block < BLOCK_SIZE; idx_in_block += 1) {
+                    for (uint64_t row_idx = idx_in_block; row_idx < BLOCK_WINDOW_SIZE; row_idx += BLOCK_SIZE) {
+                        buffer[flat_idx] = *ptrs[window_start_idx + row_idx];
+                        flat_idx += 1;
+                    }
                 }
             }
 
@@ -235,6 +238,14 @@ namespace duckdb {
                     auto &mask = masks[col_idx];
                     uint64_t valid_count = mask.CountValid(VECTOR_SIZE);
                     total_valid_values[col_idx] += valid_count;
+
+                    const auto validity_mask_ptr = reinterpret_cast<uint8_t*>(mask.GetData());
+
+                    for (uint64_t d_idx = 0; d_idx < VECTOR_SIZE / 8; d_idx += 1) {
+                        std::cout << std::bitset<8>(validity_mask_ptr[d_idx]) << " ";
+                    }
+
+                    std::cout << '\n';
                     mask.Reset(VECTOR_SIZE);
                     mask.Initialize(VECTOR_SIZE);
                 }
