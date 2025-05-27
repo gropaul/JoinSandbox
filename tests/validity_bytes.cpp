@@ -7,13 +7,12 @@
 const uint64_t ROW_COUNT = 1000000;
 const uint64_t ROW_KEYS = 3;
 const uint64_t VECTOR_SIZE = 2048; // Standard vector size for operations
-const uint64_t N_VECTORS = 1000; // Number of vectors to test
+const uint64_t N_VECTORS = 3000; // Number of vectors to test
 const uint64_t NUM_RUNS = 5; // Number of runs per strategy
 
 const uint64_t SEED = 42; // Seed for reproducibility
 
 namespace duckdb {
-
     struct TestRows {
         uint64_t n_keys;
         uint8_t *allocation;
@@ -96,10 +95,9 @@ namespace duckdb {
         return layout;
     }
 
-    void GatherValidityMask(uint8_t **ptrs, uint64_t row_count, uint8_t* buffer, vector<ValidityMask> &masks, vector<column_t> &columns) {
-
-        for (auto col_idx : columns) {
-
+    void GatherValidityMask(uint8_t **ptrs, const uint64_t row_count, uint8_t *buffer, vector<ValidityMask> &masks,
+                            const vector<column_t> &columns) {
+        for (auto col_idx: columns) {
             ValidityMask &mask = masks[col_idx];
 
             // Precompute mask indexes
@@ -108,7 +106,7 @@ namespace duckdb {
             ValidityBytes::GetEntryIndex(col_idx, entry_idx, idx_in_entry);
 
             for (uint64_t target_idx = 0; target_idx < row_count; ++target_idx) {
-                uint8_t* source_row = ptrs[target_idx];
+                uint8_t *source_row = ptrs[target_idx];
 
                 // Read the validity byte
                 ValidityBytes row_mask(source_row, 1);
@@ -120,26 +118,95 @@ namespace duckdb {
     }
 
     // Optimized gather validity mask strategy
-    void GatherValidityMaskOptimized(uint8_t **ptrs, uint64_t row_count, uint8_t* buffer, vector<ValidityMask> &masks, vector<column_t> &columns) {
-        // iterate,
+    void GatherValidityMaskOptimized(uint8_t **ptrs, const uint64_t row_count, uint8_t *buffer, vector<ValidityMask> &masks,
+                                     const vector<column_t> &columns) {
+        constexpr uint64_t BLOCK_SIZE = 8;
+        constexpr uint64_t BITS_PER_BYTE = 8;
+        constexpr uint64_t BLOCK_WINDOW_SIZE = BLOCK_SIZE * BITS_PER_BYTE;
+
+        uint8_t collector[BLOCK_SIZE];
+
+        for (const auto col_idx: columns) {
+            ValidityMask &mask = masks[col_idx];
+
+            auto __restrict *validity_mask_ptr = reinterpret_cast<uint8_t *>(mask.GetData());
+
+            uint64_t flat_idx = 0;
+            for (uint64_t idx_in_block = 0; idx_in_block < BLOCK_SIZE; idx_in_block += 1) {
+                for (uint64_t row_idx = idx_in_block; row_idx < row_count; row_idx += BLOCK_SIZE) {
+                    buffer[flat_idx] = *ptrs[row_idx];
+                    flat_idx += 1;
+                }
+            }
+
+            const uint8_t column_bitmask = 0x1 << col_idx;
+
+            uint64_t validity_idx = 0;
+            const uint64_t column_bit_original_position = col_idx;
+
+            for (uint64_t window_start_idx = 0; window_start_idx < row_count; window_start_idx += BLOCK_WINDOW_SIZE ) {
+
+                uint64_t block_bit_target_position = 0;
+
+                // initialize collector with zero
+                for (uint64_t idx_in_block = 0; idx_in_block < BLOCK_SIZE; idx_in_block += 1) {
+                    collector[idx_in_block] = 0;
+                }
+
+                for (uint64_t outer_loop_idx = 0; outer_loop_idx < BLOCK_WINDOW_SIZE; outer_loop_idx += BITS_PER_BYTE) {
+                    for (uint64_t idx_in_block = 0; idx_in_block < BLOCK_SIZE; idx_in_block += 1) {
+                        const uint64_t buffer_idx = window_start_idx + outer_loop_idx + idx_in_block;
+                        const uint8_t buffer_byte = buffer[buffer_idx];
+                        // std::cout << "buffer_byte:                  " << std::bitset<8>(buffer_byte) << "\n";
+                        // get the bit of for this column, can be spread across the byte
+                        const uint8_t column_bit = buffer_byte & column_bitmask;
+                        // std::cout << "column_bit:                   " << std::bitset<8>(column_bit) << "\n";
+                        // make sure that the column bit is at the lowest bit
+                        const uint8_t column_bit_shifted = column_bit >> column_bit_original_position;
+                        // std::cout << "column_bit_shifted:           " << std::bitset<8>(column_bit_shifted) << "\n";
+                        // now shift the bit according to the group, so that for the first BLOCK_SIZE the bit is at index 0,
+                        // then the bit is at index 1, ...
+                        const uint8_t column_bit_shifted_to_combine = column_bit_shifted << block_bit_target_position;
+                        // std::cout << "column_bit_shifted_to_combine:" << std::bitset<8>(column_bit_shifted_to_combine) << "\n";
+
+                        // Apply the bit to the collector
+                        collector[idx_in_block] |= column_bit_shifted_to_combine;
+                        // std::cout << "collector[idx_in_block]:      " << std::bitset<8>(collector[idx_in_block]) << "\n";
+                        // std::cout << "collector:                    ";
+                        // for (uint64_t d_idx = 0; d_idx < BLOCK_SIZE; d_idx += 1) {
+                        //     std::cout << std::bitset<8>(collector[d_idx]) << " ";
+                        // }
+                        // std::cout << "\n\n";
+
+                    }
+                    block_bit_target_position += 1;
+                }
+
+                for (uint64_t idx_in_block = 0; idx_in_block < BLOCK_SIZE; idx_in_block += 1) {
+                    validity_mask_ptr[validity_idx + idx_in_block] = collector[idx_in_block];
+                }
+                validity_idx += BLOCK_SIZE;
+            }
+        }
     }
 
     struct StrategyResult {
         double avg_time;
-        vector<uint64_t> null_bytes_per_column;
+        vector<uint64_t> non_null_bytes_per_column;
 
         // To print the result
         void Print(const std::string &strategy_name) {
             std::cout << strategy_name << " - Average Time: " << avg_time << " seconds" << std::endl;
-            for (size_t i = 0; i < null_bytes_per_column.size(); ++i) {
-                std::cout << "\t Column " << i << ": " << null_bytes_per_column[i] << " null bytes" << std::endl;
+            for (size_t i = 0; i < non_null_bytes_per_column.size(); ++i) {
+                std::cout << "\t Column " << i << ": " << non_null_bytes_per_column[i] << " valid bytes" << std::endl;
             }
         }
     };
 
     // Test a strategy multiple times and return the average result
-    StrategyResult TestStrategy(void (*gather_function)(uint8_t**, uint64_t, uint8_t*, vector<ValidityMask>&, vector<column_t>&), const std::string &strategy_name) {
-
+    StrategyResult TestStrategy(
+        void (*gather_function)(uint8_t **, const uint64_t, uint8_t *, vector<ValidityMask> &,const vector<column_t> &),
+        const std::string &strategy_name) {
         // set the random seed for reproducibility
         std::srand(SEED);
 
@@ -148,7 +215,7 @@ namespace duckdb {
 
         for (uint64_t run = 0; run < NUM_RUNS; ++run) {
             duckdb::TestRows layout = duckdb::InitializeRowLayout();
-            auto* buffer = new uint8_t[STANDARD_VECTOR_SIZE];
+            auto *buffer = new uint8_t[STANDARD_VECTOR_SIZE];
             duckdb::vector<uint64_t> total_valid_values(layout.columns.size(), 0);
 
             duckdb::vector<duckdb::ValidityMask> masks(layout.columns.size());
@@ -169,6 +236,7 @@ namespace duckdb {
                     uint64_t valid_count = mask.CountValid(VECTOR_SIZE);
                     total_valid_values[col_idx] += valid_count;
                     mask.Reset(VECTOR_SIZE);
+                    mask.Initialize(VECTOR_SIZE);
                 }
             }
 
@@ -192,7 +260,7 @@ namespace duckdb {
         // Calculate average time and return result
         StrategyResult result;
         result.avg_time = total_time / NUM_RUNS;
-        result.null_bytes_per_column = total_valid_values_avg;
+        result.non_null_bytes_per_column = total_valid_values_avg;
         result.Print(strategy_name);
         return result;
     }
